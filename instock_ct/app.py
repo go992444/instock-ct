@@ -41,6 +41,9 @@ from instock_ct.erp_import import (  # noqa: E402
     PRESET_LABELS,
     build_reorder_export_frame,
     build_sample_erp_sku_csv_bytes,
+    coerce_float,
+    is_korean_sales_frame,
+    parse_native_sales_frame,
     parse_sales_csv,
     parse_sku_csv,
     skus_to_erp_export_frame,
@@ -136,14 +139,8 @@ def _skus_to_edit_frame(skus: list[SkuMaster]) -> pd.DataFrame:
 
 
 def _to_float(value: object, default: float = 0.0) -> float:
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return default
-    if isinstance(value, str):
-        text = value.strip().replace(",", "")
-        if not text or text.lower() == "none":
-            return default
-        return float(text)
-    return float(value)
+    parsed = coerce_float(value, default=None)
+    return default if parsed is None else parsed
 
 
 def _to_int(value: object, default: int = 1) -> int:
@@ -504,19 +501,24 @@ def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
 
     sales: list[WeeklySales] | None = None
     frame: pd.DataFrame
+    load_warnings: list[str] = []
 
     if uploaded:
         raw = pd.read_csv(uploaded)
-        if preset == "erp_korean":
-            sales, report = parse_sales_csv(raw, preset=preset)
-            if not report.ok:
-                st.error("; ".join(report.messages))
-                return
-            frame = pd.DataFrame(
-                [{"sku_id": s.sku_id, "week_start": s.week_start, "qty": s.qty} for s in sales]
-            )
+        use_korean = preset == "erp_korean" or is_korean_sales_frame(raw)
+        if use_korean:
+            if preset != "erp_korean":
+                st.info("한글 컬럼(품목코드·주간시작일·출고수량)이 감지되어 ERP 한글 형식으로 읽습니다.")
+            sales, report = parse_sales_csv(raw, preset="erp_korean")
         else:
-            frame = raw
+            sales, report = parse_native_sales_frame(raw)
+        if not report.ok:
+            st.error("; ".join(report.messages))
+            return
+        load_warnings = report.warnings
+        frame = pd.DataFrame(
+            [{"sku_id": s.sku_id, "week_start": s.week_start, "qty": s.qty} for s in sales]
+        )
     elif st.session_state.get("imported_sales"):
         sales = st.session_state.imported_sales
         frame = pd.DataFrame(
@@ -526,21 +528,23 @@ def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
         frame = sample_df
         st.info("데모: 내장 샘플 12주 데이터 사용 중")
 
-    frame.columns = [str(c).strip().lower() for c in frame.columns]
-    required = {"sku_id", "week_start", "qty"}
-    if not required.issubset(set(frame.columns)):
-        st.error(f"CSV에 {required} 컬럼이 필요합니다.")
+    if sales is None:
+        sales, report = parse_native_sales_frame(frame)
+        if not report.ok:
+            st.error("; ".join(report.messages))
+            return
+        load_warnings = report.warnings
+
+    for warning in load_warnings[:8]:
+        st.warning(warning)
+    if len(load_warnings) > 8:
+        st.warning(f"외 {len(load_warnings) - 8}건 변환 경고")
+
+    if not sales:
+        st.warning("예측할 데이터가 없습니다.")
         return
 
-    if sales is None:
-        sales = [
-            WeeklySales(
-                sku_id=str(row["sku_id"]),
-                week_start=str(row["week_start"]),
-                qty=float(row["qty"]),
-            )
-            for _, row in frame.iterrows()
-        ]
+    frame.columns = [str(c).strip().lower() for c in frame.columns]
     names = {s.sku_id: s.name for s in skus}
     forecasts = forecast_from_weekly_sales(sales, sku_names=names)
 

@@ -97,6 +97,32 @@ class ImportReport:
     warnings: list[str] = field(default_factory=list)
 
 
+def coerce_float(value: object, *, default: float | None = None) -> float | None:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return default
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text.lower() in {"none", "nan", "-"}:
+            return default
+        text = text.replace(",", "")
+        try:
+            return float(text)
+        except ValueError:
+            return default
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    if pd.isna(result):
+        return default
+    return result
+
+
+def is_korean_sales_frame(frame: pd.DataFrame) -> bool:
+    cols = {str(column).strip() for column in frame.columns}
+    return bool(cols & {"품목코드", "주간시작일", "출고수량", "상품코드"})
+
+
 def _normalize_columns(frame: pd.DataFrame) -> pd.DataFrame:
     out = frame.copy()
     out.columns = [str(c).strip() for c in out.columns]
@@ -170,16 +196,18 @@ def parse_sku_csv(
         else:
             cat_code, cat_label = _resolve_category(cat_label_raw)
 
-        try:
-            on_hand = float(row.get("on_hand", 0) or 0)
-            avg_daily = float(row.get("avg_daily_demand", 0) or 0)
-            lead_time = int(float(row.get("lead_time_days", 7) or 7))
-            moq = int(float(row.get("moq", 1) or 1))
-            safety = float(row.get("safety_stock_days", 7) or 7)
-            vendor = str(row.get("vendor", "-")).strip() or "-"
-        except (TypeError, ValueError) as exc:
-            report.warnings.append(f"{sku_id}: 숫자 변환 실패 ({exc})")
+        on_hand = coerce_float(row.get("on_hand"), default=None)
+        avg_daily = coerce_float(row.get("avg_daily_demand"), default=None)
+        lead_time_raw = coerce_float(row.get("lead_time_days", 7), default=None)
+        moq_raw = coerce_float(row.get("moq", 1), default=None)
+        safety_raw = coerce_float(row.get("safety_stock_days", 7), default=None)
+        if None in (on_hand, avg_daily, lead_time_raw, moq_raw, safety_raw):
+            report.warnings.append(f"{sku_id}: 숫자 변환 실패")
             continue
+        lead_time = int(lead_time_raw)
+        moq = int(moq_raw)
+        safety = float(safety_raw)
+        vendor = str(row.get("vendor", "-")).strip() or "-"
 
         if avg_daily <= 0:
             report.warnings.append(f"{sku_id}: 일평균출고 0 — 결품 계산 제외 권장")
@@ -232,16 +260,50 @@ def parse_sales_csv(
         if not sku_id:
             continue
         week = str(row.get("week_start", "")).strip()
-        try:
-            qty = float(row.get("qty", 0) or 0)
-        except (TypeError, ValueError):
-            report.warnings.append(f"행 {index + 2}: 수량 변환 실패")
+        qty = coerce_float(row.get("qty", 0), default=None)
+        if qty is None:
+            report.warnings.append(
+                f"행 {index + 2} ({sku_id}): 출고수량 형식 오류 — '{row.get('qty')}'"
+            )
             continue
         sales.append(WeeklySales(sku_id=sku_id, week_start=week, qty=qty))
 
     report.ok = len(sales) > 0
     report.row_count = len(sales)
     report.messages.append(f"출고 이력 {len(sales)}건 로드 완료")
+    return sales, report
+
+
+def parse_native_sales_frame(frame: pd.DataFrame) -> tuple[list[WeeklySales], ImportReport]:
+    mapped = frame.copy()
+    mapped.columns = [str(column).strip().lower() for column in mapped.columns]
+    required = set(CANONICAL_SALES_COLUMNS)
+    missing = required - set(mapped.columns)
+    report = ImportReport(ok=not missing, row_count=len(mapped), messages=[], warnings=[])
+    if missing:
+        report.messages.append(f"필수 컬럼 누락: {', '.join(sorted(missing))}")
+        return [], report
+
+    sales: list[WeeklySales] = []
+    for index, row in mapped.iterrows():
+        sku_id = str(row.get("sku_id", "")).strip()
+        if not sku_id:
+            continue
+        week = str(row.get("week_start", "")).strip()
+        qty = coerce_float(row.get("qty"), default=None)
+        if qty is None:
+            report.warnings.append(
+                f"행 {index + 2} ({sku_id}): 출고수량 형식 오류 — '{row.get('qty')}'"
+            )
+            continue
+        sales.append(WeeklySales(sku_id=sku_id, week_start=week, qty=qty))
+
+    report.ok = len(sales) > 0
+    report.row_count = len(sales)
+    if sales:
+        report.messages.append(f"출고 이력 {len(sales)}건 로드 완료")
+    else:
+        report.messages.append("읽을 수 있는 출고 행이 없습니다.")
     return sales, report
 
 
