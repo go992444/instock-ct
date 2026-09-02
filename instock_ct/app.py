@@ -135,6 +135,21 @@ def _skus_to_edit_frame(skus: list[SkuMaster]) -> pd.DataFrame:
     )
 
 
+def _to_float(value: object, default: float = 0.0) -> float:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return default
+    if isinstance(value, str):
+        text = value.strip().replace(",", "")
+        if not text or text.lower() == "none":
+            return default
+        return float(text)
+    return float(value)
+
+
+def _to_int(value: object, default: int = 1) -> int:
+    return int(_to_float(value, float(default)))
+
+
 def _parse_edit_frame(frame: pd.DataFrame) -> tuple[list[SkuMaster] | None, list[str]]:
     errors: list[str] = []
     if frame.empty:
@@ -167,11 +182,11 @@ def _parse_edit_frame(frame: pd.DataFrame) -> tuple[list[SkuMaster] | None, list
             continue
 
         try:
-            on_hand = float(row.get("현재고", 0))
-            avg_daily = float(row.get("일평균출고", 0))
-            lead_time = int(row.get("리드타임일", 1))
-            moq = int(row.get("MOQ", 1))
-            safety_days = float(row.get("안전재고일", 7))
+            on_hand = _to_float(row.get("현재고", 0))
+            avg_daily = _to_float(row.get("일평균출고", 0))
+            lead_time = _to_int(row.get("리드타임일", 1), 1)
+            moq = _to_int(row.get("MOQ", 1), 1)
+            safety_days = _to_float(row.get("안전재고일", 7), 7.0)
         except (TypeError, ValueError):
             errors.append(f"{row_no}행 ({sku_id}): 숫자 형식이 올바르지 않습니다.")
             continue
