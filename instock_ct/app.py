@@ -60,6 +60,8 @@ from instock_ct.erp_import import (  # noqa: E402
     parse_sku_csv,
     parse_younglimwon_inventory,
     read_uploaded_table,
+    sales_from_sku_masters,
+    sync_sales_from_inventory,
     is_younglimwon_inventory_frame,
     skus_to_erp_export_frame,
 )
@@ -314,7 +316,8 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
     with st.expander("📥 대량 가져오기 (CSV / Excel)", expanded=len(skus) < 30):
         st.caption(
             "ERP·영림원·최소 4컬럼 형식을 지원합니다. "
-            "카테고리는 **품목분류2** 값이 우선 반영됩니다(없으면 품목분류1·카테고리)."
+            "카테고리는 **품목분류2** 값이 우선 반영됩니다. "
+            "가져온 **일평균출고**는 ④ 수요 예측·② 발주에 자동 연동됩니다."
         )
         bulk_preset = st.radio(
             "파일 형식",
@@ -372,6 +375,7 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
             key="master_bulk_inv",
         )
         if bulk_file is not None:
+            raw = read_uploaded_table(bulk_file)
             imported, report = parse_inventory_upload(
                 bulk_file,
                 preset=bulk_preset,
@@ -381,6 +385,13 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
             if report.ok:
                 merged, stats = merge_sku_masters(skus, imported, mode=bulk_mode)
                 st.session_state.skus = merged
+                st.session_state.imported_sales = sync_sales_from_inventory(
+                    raw,
+                    merged,
+                    preset=bulk_preset,
+                    min_outbound=float(master_ylw_min),
+                    period_days=float(master_ylw_period),
+                ) or None
                 _bump_data_editor("master_editor")
                 parts = [f"파일 {len(imported)}건 처리"]
                 if stats["added"]:
@@ -390,6 +401,8 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
                 if stats["skipped"]:
                     parts.append(f"건너뜀 {stats['skipped']}건")
                 parts.append(f"총 {stats['total']}건")
+                if st.session_state.imported_sales:
+                    parts.append(f"④ 수요예측 {len(st.session_state.imported_sales)}건 연동")
                 st.session_state.master_save_flash = " · ".join(parts)
                 for warning in report.warnings[:5]:
                     st.warning(warning)
@@ -464,9 +477,19 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
                 st.error(f"외 {len(errors) - 8}건 오류")
         else:
             st.session_state.skus = parsed
-            st.session_state.master_save_flash = f"SKU {len(parsed)}건 저장되었습니다."
+            _refresh_sales_from_skus(parsed)
+            sales_count = len(st.session_state.imported_sales or [])
+            flash = f"SKU {len(parsed)}건 저장되었습니다."
+            if sales_count:
+                flash += f" ④ 수요예측 {sales_count}건 연동."
+            st.session_state.master_save_flash = flash
             _bump_data_editor("master_editor")
             st.rerun()
+
+
+def _refresh_sales_from_skus(skus: list[SkuMaster]) -> None:
+    sales = sales_from_sku_masters(skus)
+    st.session_state.imported_sales = sales if sales else None
 
 
 def _default_turnover_thresholds() -> dict[str, float]:
@@ -795,6 +818,7 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
             key="erp_inv",
         )
         if inv_file is not None:
+            raw = read_uploaded_table(inv_file)
             skus, report = parse_inventory_upload(
                 inv_file,
                 preset=preset,
@@ -803,8 +827,19 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
             )
             if report.ok:
                 st.session_state.skus = skus
+                st.session_state.imported_sales = sync_sales_from_inventory(
+                    raw,
+                    skus,
+                    preset=preset,
+                    min_outbound=float(ylw_min_out),
+                    period_days=float(ylw_period),
+                ) or None
                 _bump_data_editor("master_editor")
                 st.success("; ".join(report.messages))
+                if st.session_state.imported_sales:
+                    st.info(
+                        f"④ 수요 예측 탭에 출고 데이터 {len(st.session_state.imported_sales)}건 연동됨"
+                    )
                 for w in report.warnings[:5]:
                     st.warning(w)
                 st.dataframe(skus_to_erp_export_frame(skus).head(10), hide_index=True)
@@ -869,8 +904,16 @@ def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
     st.caption("최근 N주 이동평균 기반 — 실무용 간이 예측 (딥러닝 아님)")
 
     sample_df = pd.DataFrame(weekly_sales_to_dataframe_rows(build_sample_weekly_sales()))
+    master_sales = sales_from_sku_masters(skus)
     if st.session_state.get("imported_sales"):
-        st.success(f"ERP 연동 출고 이력 {len(st.session_state.imported_sales)}건 사용 가능")
+        st.success(
+            f"출고·수요 데이터 {len(st.session_state.imported_sales)}건 사용 "
+            "(⑦ 마스터 편집·ERP 연동과 연동됨)"
+        )
+    elif master_sales:
+        st.success(
+            f"⑦ 마스터 편집 일평균출고 {len(master_sales)}건을 주간 수요로 환산해 사용합니다."
+        )
 
     st.download_button(
         "샘플 주간 출고 CSV (기본 형식)",
@@ -879,14 +922,18 @@ def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
         mime="text/csv",
     )
 
-    uploaded = st.file_uploader("주간 출고 CSV", type=["csv"], key="forecast_upload")
-    preset = st.radio(
-        "CSV 형식",
-        options=list(PRESET_LABELS.keys()),
-        format_func=lambda k: PRESET_LABELS[k],
-        horizontal=True,
-        key="forecast_preset",
-    )
+    uploaded = None
+    preset = st.session_state.get("forecast_preset", "erp_korean")
+    with st.expander("주간 출고 CSV 추가 업로드 (선택)", expanded=False):
+        st.caption("별도 주간 이력 CSV가 있을 때만 사용하세요. 없으면 마스터·ERP 데이터를 자동 사용합니다.")
+        uploaded = st.file_uploader("주간 출고 CSV", type=["csv"], key="forecast_upload")
+        preset = st.radio(
+            "CSV 형식",
+            options=list(PRESET_LABELS.keys()),
+            format_func=lambda k: PRESET_LABELS[k],
+            horizontal=True,
+            key="forecast_preset",
+        )
 
     sales: list[WeeklySales] | None = None
     frame: pd.DataFrame
@@ -914,6 +961,11 @@ def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
         )
     elif st.session_state.get("imported_sales"):
         sales = st.session_state.imported_sales
+        frame = pd.DataFrame(
+            [{"sku_id": s.sku_id, "week_start": s.week_start, "qty": s.qty} for s in sales]
+        )
+    elif master_sales:
+        sales = master_sales
         frame = pd.DataFrame(
             [{"sku_id": s.sku_id, "week_start": s.week_start, "qty": s.qty} for s in sales]
         )

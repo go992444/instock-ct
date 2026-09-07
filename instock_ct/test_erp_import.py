@@ -19,6 +19,7 @@ from instock_ct.erp_import import (
     parse_younglimwon_aggregated_sales,
     parse_younglimwon_inventory,
     read_uploaded_csv,
+    sales_from_sku_masters,
 )
 from instock_ct.models import SkuMaster
 
@@ -193,6 +194,38 @@ class ErpImportTests(unittest.TestCase):
         upload = FakeUpload(text.encode("cp949"))
         frame = read_uploaded_csv(upload)
         self.assertEqual(list(frame.columns), ["품목코드", "주간시작일", "출고수량"])
+
+    def test_sales_from_sku_masters(self) -> None:
+        skus = [
+            SkuMaster(
+                sku_id="A-001",
+                name="Test",
+                category="general",
+                category_label="일반 소모품",
+                on_hand=10,
+                avg_daily_demand=2.5,
+                lead_time_days=7,
+                moq=1,
+                vendor="-",
+                safety_stock_days=7,
+            ),
+            SkuMaster(
+                sku_id="B-002",
+                name="Zero demand",
+                category="general",
+                category_label="일반 소모품",
+                on_hand=5,
+                avg_daily_demand=0,
+                lead_time_days=7,
+                moq=1,
+                vendor="-",
+                safety_stock_days=7,
+            ),
+        ]
+        sales = sales_from_sku_masters(skus)
+        self.assertEqual(len(sales), 1)
+        self.assertEqual(sales[0].sku_id, "A-001")
+        self.assertAlmostEqual(sales[0].qty, 17.5)
 
     def test_merge_sku_masters_modes(self) -> None:
         existing = [

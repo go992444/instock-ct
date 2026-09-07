@@ -452,6 +452,46 @@ def merge_sku_masters(
     }
 
 
+def sales_from_sku_masters(
+    skus: list[SkuMaster],
+    *,
+    week_label: str = "마스터(일평균환산)",
+) -> list[WeeklySales]:
+    """Build weekly-equivalent sales rows from master avg_daily_demand."""
+    sales: list[WeeklySales] = []
+    for sku in skus:
+        if sku.avg_daily_demand <= 0:
+            continue
+        sales.append(
+            WeeklySales(
+                sku_id=sku.sku_id,
+                week_start=week_label,
+                qty=round(sku.avg_daily_demand * 7.0, 2),
+            )
+        )
+    return sales
+
+
+def sync_sales_from_inventory(
+    raw: pd.DataFrame,
+    skus: list[SkuMaster],
+    *,
+    preset: str = "erp_korean",
+    min_outbound: float = 0.0,
+    period_days: float = 30.0,
+) -> list[WeeklySales]:
+    """Derive forecast sales from upload file, falling back to master daily demand."""
+    sales, report = parse_sales_upload(
+        raw,
+        preset=preset,
+        min_outbound=min_outbound,
+        period_days=period_days,
+    )
+    if report.ok and sales:
+        return sales
+    return sales_from_sku_masters(skus)
+
+
 def prepare_younglimwon_inventory(
     frame: pd.DataFrame,
     *,
