@@ -901,7 +901,10 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
 
 def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
     st.subheader("수요 추이 · 간단 예측")
-    st.caption("최근 N주 이동평균 기반 — 실무용 간이 예측 (딥러닝 아님)")
+    st.caption(
+        "주간 이력 2주 이상이면 **다음주 예측 = 최근주 + 주간 변화량 평균** · "
+        "마스터/영림원 기간 1건이면 **주·월 평균**만 표시(추이 없음)"
+    )
 
     sample_df = pd.DataFrame(weekly_sales_to_dataframe_rows(build_sample_weekly_sales()))
     master_sales = sales_from_sku_masters(skus)
@@ -1011,9 +1014,13 @@ def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
                 "품명": item.name,
                 "집계 주수": item.history_weeks,
                 "주간 평균": round(item.avg_weekly, 1),
-                "다음주 예측": round(item.forecast_next_week, 1),
+                "월 평균": round(item.avg_monthly, 1),
+                "다음주 예측": round(item.forecast_next_week, 1)
+                if item.forecast_next_week is not None
+                else "—",
                 "환산 일출고": round(item.suggested_daily_demand, 2),
                 "추세": item.trend,
+                "예측 근거": item.forecast_basis,
                 "예측 기반 발주량": suggested_order,
             }
         )

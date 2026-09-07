@@ -105,6 +105,8 @@ class ForecastResult:
     name: str
     history_weeks: int
     avg_weekly: float
-    forecast_next_week: float
+    avg_monthly: float
+    forecast_next_week: float | None
     suggested_daily_demand: float
     trend: str
+    forecast_basis: str = ""

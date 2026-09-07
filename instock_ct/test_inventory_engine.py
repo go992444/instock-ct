@@ -42,7 +42,33 @@ class InstockEngineTests(unittest.TestCase):
         sales = build_sample_weekly_sales()
         results = forecast_from_weekly_sales(sales)
         self.assertGreater(len(results), 10)
+        self.assertIsNotNone(results[0].forecast_next_week)
+        assert results[0].forecast_next_week is not None
         self.assertGreater(results[0].forecast_next_week, 0)
+        self.assertGreater(results[0].avg_monthly, results[0].avg_weekly)
+
+    def test_forecast_trend_differs_from_average(self) -> None:
+        from instock_ct.models import WeeklySales
+
+        sales = [
+            WeeklySales("A-001", "2026-01-06", 100.0),
+            WeeklySales("A-001", "2026-01-13", 120.0),
+            WeeklySales("A-001", "2026-01-20", 140.0),
+        ]
+        results = forecast_from_weekly_sales(sales)
+        self.assertEqual(len(results), 1)
+        self.assertIsNotNone(results[0].forecast_next_week)
+        self.assertNotAlmostEqual(results[0].avg_weekly, results[0].forecast_next_week, places=0)
+        self.assertEqual(results[0].forecast_basis, "최근 3주 추세 반영")
+
+    def test_forecast_single_period_has_monthly_only(self) -> None:
+        from instock_ct.models import WeeklySales
+
+        sales = [WeeklySales("A-001", "기간합계(30일)", 70.0)]
+        results = forecast_from_weekly_sales(sales)
+        self.assertIsNone(results[0].forecast_next_week)
+        self.assertAlmostEqual(results[0].avg_monthly, 70.0 * 30.0 / 7.0, places=1)
+        self.assertEqual(results[0].forecast_basis, "기간 1건·추이 불가")
 
     def test_risk_summary_counts(self) -> None:
         risks = [assess_stockout_risk(s) for s in DEFAULT_SKUS]
