@@ -9,6 +9,7 @@ import pandas as pd
 
 from instock_ct.erp_import import (
     is_korean_sales_frame,
+    merge_sku_masters,
     parse_native_sales_frame,
     parse_sales_csv,
     parse_sales_upload,
@@ -17,6 +18,7 @@ from instock_ct.erp_import import (
     parse_younglimwon_inventory,
     read_uploaded_csv,
 )
+from instock_ct.models import SkuMaster
 
 SAMPLES = Path(__file__).resolve().parent / "samples"
 
@@ -131,6 +133,76 @@ class ErpImportTests(unittest.TestCase):
         upload = FakeUpload(text.encode("cp949"))
         frame = read_uploaded_csv(upload)
         self.assertEqual(list(frame.columns), ["품목코드", "주간시작일", "출고수량"])
+
+    def test_merge_sku_masters_modes(self) -> None:
+        existing = [
+            SkuMaster(
+                sku_id="A",
+                name="Alpha",
+                category="general_consumable",
+                category_label="일반 소모품",
+                on_hand=10,
+                avg_daily_demand=1.0,
+                lead_time_days=7,
+                moq=1,
+                vendor="-",
+                safety_stock_days=7,
+            ),
+            SkuMaster(
+                sku_id="B",
+                name="Beta",
+                category="general_consumable",
+                category_label="일반 소모품",
+                on_hand=20,
+                avg_daily_demand=2.0,
+                lead_time_days=7,
+                moq=1,
+                vendor="-",
+                safety_stock_days=7,
+            ),
+        ]
+        imported = [
+            SkuMaster(
+                sku_id="A",
+                name="Alpha updated",
+                category="general_consumable",
+                category_label="일반 소모품",
+                on_hand=99,
+                avg_daily_demand=9.0,
+                lead_time_days=7,
+                moq=1,
+                vendor="-",
+                safety_stock_days=7,
+            ),
+            SkuMaster(
+                sku_id="C",
+                name="Charlie",
+                category="general_consumable",
+                category_label="일반 소모품",
+                on_hand=5,
+                avg_daily_demand=0.5,
+                lead_time_days=7,
+                moq=1,
+                vendor="-",
+                safety_stock_days=7,
+            ),
+        ]
+
+        replaced, stats = merge_sku_masters(existing, imported, mode="replace")
+        self.assertEqual(len(replaced), 2)
+        self.assertEqual(stats["total"], 2)
+
+        merged, stats = merge_sku_masters(existing, imported, mode="merge")
+        self.assertEqual([s.sku_id for s in merged], ["A", "B", "C"])
+        self.assertEqual(merged[0].on_hand, 99)
+        self.assertEqual(stats["updated"], 1)
+        self.assertEqual(stats["added"], 1)
+
+        appended, stats = merge_sku_masters(existing, imported, mode="append")
+        self.assertEqual([s.sku_id for s in appended], ["A", "B", "C"])
+        self.assertEqual(appended[0].on_hand, 10)
+        self.assertEqual(stats["skipped"], 1)
+        self.assertEqual(stats["added"], 1)
 
 
 if __name__ == "__main__":

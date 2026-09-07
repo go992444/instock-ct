@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import io
 from dataclasses import dataclass, field
 
@@ -111,6 +112,12 @@ PRESET_LABELS = {
     "younglimwon": "영림원 재고현황 (품목번호·재고수량·출고계)",
 }
 
+MERGE_MODE_LABELS = {
+    "replace": "전체 교체 (기존 데이터 삭제)",
+    "merge": "병합 (같은 품목코드는 파일 값으로 갱신)",
+    "append": "신규만 추가 (기존 품목은 유지)",
+}
+
 
 @dataclass
 class ImportReport:
@@ -216,6 +223,65 @@ def read_uploaded_table(upload) -> pd.DataFrame:
     if name.endswith((".xlsx", ".xls")):
         return pd.read_excel(upload, header=1)
     return read_uploaded_csv(upload)
+
+
+def parse_inventory_upload(
+    upload,
+    *,
+    preset: str = "erp_korean",
+    min_outbound: float = 10.0,
+    period_days: float = 30.0,
+) -> tuple[list[SkuMaster], ImportReport]:
+    """Parse a CSV/Excel inventory upload into SKU masters."""
+    raw = read_uploaded_table(upload)
+    if preset == "younglimwon" or is_younglimwon_inventory_frame(raw):
+        return parse_younglimwon_inventory(
+            raw,
+            min_outbound=min_outbound,
+            period_days=period_days,
+        )
+    return parse_sku_csv(raw, preset=preset)
+
+
+def merge_sku_masters(
+    existing: list[SkuMaster],
+    imported: list[SkuMaster],
+    *,
+    mode: str = "merge",
+) -> tuple[list[SkuMaster], dict[str, int]]:
+    """Combine imported SKUs with the current master list."""
+    if mode == "replace":
+        merged = copy.deepcopy(imported)
+        return merged, {
+            "added": len(imported),
+            "updated": 0,
+            "skipped": 0,
+            "total": len(merged),
+        }
+
+    by_id = {sku.sku_id: copy.deepcopy(sku) for sku in existing}
+    order = [sku.sku_id for sku in existing]
+    added = updated = skipped = 0
+
+    for sku in imported:
+        if sku.sku_id in by_id:
+            if mode == "merge":
+                by_id[sku.sku_id] = sku
+                updated += 1
+            else:
+                skipped += 1
+        else:
+            by_id[sku.sku_id] = sku
+            order.append(sku.sku_id)
+            added += 1
+
+    merged = [by_id[sku_id] for sku_id in order]
+    return merged, {
+        "added": added,
+        "updated": updated,
+        "skipped": skipped,
+        "total": len(merged),
+    }
 
 
 def prepare_younglimwon_inventory(

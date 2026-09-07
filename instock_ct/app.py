@@ -45,12 +45,15 @@ from instock_ct.inventory_engine import (  # noqa: E402
 )
 from instock_ct.models import SkuMaster, WeeklySales  # noqa: E402
 from instock_ct.erp_import import (  # noqa: E402
+    MERGE_MODE_LABELS,
     PRESET_LABELS,
     build_reorder_export_frame,
     build_sample_erp_sku_csv_bytes,
     build_minimal_erp_sku_csv_bytes,
     coerce_float,
     is_korean_sales_frame,
+    merge_sku_masters,
+    parse_inventory_upload,
     parse_native_sales_frame,
     parse_sales_csv,
     parse_sales_upload,
@@ -296,13 +299,103 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
     if flash:
         st.success(flash)
 
+    with st.expander("📥 대량 가져오기 (CSV / Excel)", expanded=len(skus) < 30):
+        st.caption(
+            "ERP·영림원·최소 4컬럼(품목코드·품명·현재고·일평균출고) 형식을 지원합니다. "
+            "파일을 올리면 아래 표에 바로 반영됩니다."
+        )
+        bulk_preset = st.radio(
+            "파일 형식",
+            options=list(PRESET_LABELS.keys()),
+            format_func=lambda k: PRESET_LABELS[k],
+            horizontal=True,
+            key="master_bulk_preset",
+        )
+        bulk_mode = st.selectbox(
+            "가져오기 방식",
+            options=list(MERGE_MODE_LABELS.keys()),
+            format_func=lambda k: MERGE_MODE_LABELS[k],
+            key="master_bulk_mode",
+        )
+        ylw_c1, ylw_c2 = st.columns(2)
+        with ylw_c1:
+            master_ylw_min = st.number_input(
+                "영림원: 출고계 최소 (이상만)",
+                min_value=0.0,
+                value=10.0,
+                step=1.0,
+                key="master_ylw_min_outbound",
+            )
+        with ylw_c2:
+            master_ylw_period = st.number_input(
+                "영림원: 출고계 기간(일) → 일평균출고",
+                min_value=1,
+                max_value=365,
+                value=30,
+                step=1,
+                key="master_ylw_period_days",
+            )
+        tpl_c1, tpl_c2 = st.columns(2)
+        with tpl_c1:
+            st.download_button(
+                "최소 템플릿 (4컬럼)",
+                build_minimal_erp_sku_csv_bytes(),
+                file_name="erp_inventory_minimal.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="master_bulk_tpl_min",
+            )
+        with tpl_c2:
+            st.download_button(
+                "전체 샘플 CSV",
+                build_sample_erp_sku_csv_bytes(),
+                file_name="erp_inventory_export.sample.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="master_bulk_tpl_sample",
+            )
+        bulk_file = st.file_uploader(
+            "재고 CSV / Excel (.xlsx)",
+            type=["csv", "xlsx", "xls"],
+            key="master_bulk_inv",
+        )
+        if bulk_file is not None:
+            imported, report = parse_inventory_upload(
+                bulk_file,
+                preset=bulk_preset,
+                min_outbound=float(master_ylw_min),
+                period_days=float(master_ylw_period),
+            )
+            if report.ok:
+                merged, stats = merge_sku_masters(skus, imported, mode=bulk_mode)
+                st.session_state.skus = merged
+                _bump_data_editor("master_editor")
+                parts = [f"파일 {len(imported)}건 처리"]
+                if stats["added"]:
+                    parts.append(f"신규 {stats['added']}건")
+                if stats["updated"]:
+                    parts.append(f"갱신 {stats['updated']}건")
+                if stats["skipped"]:
+                    parts.append(f"건너뜀 {stats['skipped']}건")
+                parts.append(f"총 {stats['total']}건")
+                st.session_state.master_save_flash = " · ".join(parts)
+                for warning in report.warnings[:5]:
+                    st.warning(warning)
+                st.rerun()
+            else:
+                st.error("; ".join(report.messages))
+
+    st.markdown(f"**현재 품목 {len(skus)}건**")
+    if len(skus) > 300:
+        st.info("품목이 많으면 표 스크롤·저장에 시간이 걸릴 수 있습니다. 대량 수정은 CSV 가져오기를 권장합니다.")
+
+    editor_height = 520 if len(skus) > 80 else None
     category_options = list(CATEGORIES.values())
-    edited = st.data_editor(
-        _skus_to_edit_frame(skus),
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        column_config={
+    editor_kwargs: dict = {
+        "num_rows": "dynamic",
+        "use_container_width": True,
+        "hide_index": True,
+        "column_config": {
             "품목코드": st.column_config.TextColumn("품목코드", required=True, width="small"),
             "품명": st.column_config.TextColumn("품명", required=True, width="medium"),
             "카테고리": st.column_config.SelectboxColumn(
@@ -330,8 +423,11 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
                 format="%.0f",
             ),
         },
-        key=_data_editor_key("master_editor"),
-    )
+        "key": _data_editor_key("master_editor"),
+    }
+    if editor_height is not None:
+        editor_kwargs["height"] = editor_height
+    edited = st.data_editor(_skus_to_edit_frame(skus), **editor_kwargs)
 
     c1, c2, c3 = st.columns([1, 1, 2])
     with c1:
@@ -346,7 +442,7 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
             key="master_csv_download",
         )
     with c3:
-        st.info("Tip: ERP 연동 탭 CSV 업로드와 동일한 컬럼 형식입니다.")
+        st.info("Tip: 위 **대량 가져오기**로 ERP·영림원 파일을 바로 넣을 수 있습니다.")
 
     if save:
         parsed, errors = _parse_edit_frame(edited)
@@ -688,15 +784,12 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
             key="erp_inv",
         )
         if inv_file is not None:
-            raw = read_uploaded_table(inv_file)
-            if preset == "younglimwon" or is_younglimwon_inventory_frame(raw):
-                skus, report = parse_younglimwon_inventory(
-                    raw,
-                    min_outbound=float(ylw_min_out),
-                    period_days=float(ylw_period),
-                )
-            else:
-                skus, report = parse_sku_csv(raw, preset=preset)
+            skus, report = parse_inventory_upload(
+                inv_file,
+                preset=preset,
+                min_outbound=float(ylw_min_out),
+                period_days=float(ylw_period),
+            )
             if report.ok:
                 st.session_state.skus = skus
                 _bump_data_editor("master_editor")
