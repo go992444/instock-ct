@@ -241,8 +241,20 @@ def _parse_edit_frame(frame: pd.DataFrame) -> tuple[list[SkuMaster] | None, list
             errors.append(f"{row_no}행 ({sku_id}): 숫자 형식이 올바르지 않습니다.")
             continue
 
-        if on_hand < 0 or avg_daily < 0 or lead_time < 1 or moq < 1 or safety_days < 0:
-            errors.append(f"{row_no}행 ({sku_id}): 음수 또는 최소값 미만입니다.")
+        if lead_time < 1:
+            lead_time = 1
+        if moq < 1:
+            moq = 1
+
+        invalid_fields: list[str] = []
+        if avg_daily < 0:
+            invalid_fields.append("일평균출고")
+        if safety_days < 0:
+            invalid_fields.append("안전재고(일)")
+        if invalid_fields:
+            errors.append(
+                f"{row_no}행 ({sku_id}): {', '.join(invalid_fields)} — 0 이상이어야 합니다."
+            )
             continue
 
         raw_expiry = str(row.get("유통기한", "")).strip()
@@ -403,10 +415,10 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
                 required=True,
                 width="medium",
             ),
-            "현재고": st.column_config.NumberColumn("현재고", min_value=0, step=1, format="%.0f"),
+            "현재고": st.column_config.NumberColumn("현재고", step=1, format="%.0f"),
             "일평균출고": st.column_config.NumberColumn("일평균출고", min_value=0, step=0.1, format="%.1f"),
-            "리드타임일": st.column_config.NumberColumn("리드타임(일)", min_value=1, step=1),
-            "MOQ": st.column_config.NumberColumn("MOQ", min_value=1, step=1),
+            "리드타임일": st.column_config.NumberColumn("리드타임(일)", min_value=0, step=1),
+            "MOQ": st.column_config.NumberColumn("MOQ", min_value=0, step=1),
             "거래처명": st.column_config.TextColumn("거래처명", width="small"),
             "안전재고일": st.column_config.NumberColumn("안전재고(일)", min_value=0, step=1),
             "유통기한": st.column_config.TextColumn(
