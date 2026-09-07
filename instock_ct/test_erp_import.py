@@ -8,6 +8,8 @@ from pathlib import Path
 import pandas as pd
 
 from instock_ct.erp_import import (
+    _flatten_excel_columns,
+    _rename_duplicate_gubun_columns,
     is_korean_sales_frame,
     merge_sku_masters,
     parse_native_sales_frame,
@@ -82,6 +84,64 @@ class ErpImportTests(unittest.TestCase):
         self.assertEqual(skus[0].sku_id, "A-001")
         self.assertAlmostEqual(skus[0].avg_daily_demand, 1.0)
         self.assertEqual(skus[0].on_hand, 100.0)
+        self.assertEqual(skus[0].category_label, "소모품")
+        self.assertEqual(skus[0].category, "general")
+
+    def test_category_prefers_item_class2(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {
+                    "품목코드": "X-1",
+                    "품명": "테스트",
+                    "현재고": 10,
+                    "품목분류1": "일반 소모품",
+                    "품목분류2": "PB",
+                }
+            ]
+        )
+        skus, report = parse_sku_csv(frame, preset="erp_korean")
+        self.assertTrue(report.ok)
+        self.assertEqual(skus[0].category, "pb")
+        self.assertEqual(skus[0].category_label, "PB")
+
+    def test_younglimwon_endoscopy_category(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {
+                    "품목번호": "ENP00001",
+                    "품명": "[내시경]테스트",
+                    "품목분류2": "내시경",
+                    "재고수량": 100,
+                    "출고계": 42,
+                }
+            ]
+        )
+        skus, report = parse_younglimwon_inventory(frame, min_outbound=0)
+        self.assertTrue(report.ok)
+        self.assertEqual(skus[0].category_label, "내시경")
+
+    def test_duplicate_gubun_columns_map_to_class2(self) -> None:
+        frame = pd.DataFrame(
+            [
+                ["ENP00001", "테스트", "대분류", "내시경", 10, 30],
+            ],
+            columns=["품목번호", "품명", "구분", "구분", "재고수량", "출고계"],
+        )
+        frame = _rename_duplicate_gubun_columns(frame)
+        skus, report = parse_younglimwon_inventory(frame, min_outbound=0)
+        self.assertTrue(report.ok)
+        self.assertEqual(skus[0].category_label, "내시경")
+
+    def test_flatten_excel_columns(self) -> None:
+        cols = [
+            ("구분", "품목분류1"),
+            ("구분", "품목분류2"),
+            ("품목번호", "Unnamed: 0_level_1"),
+        ]
+        self.assertEqual(
+            _flatten_excel_columns(cols),
+            ["품목분류1", "품목분류2", "품목번호"],
+        )
 
     def test_parse_minimal_columns(self) -> None:
         frame = pd.DataFrame(

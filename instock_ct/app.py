@@ -63,6 +63,7 @@ from instock_ct.erp_import import (  # noqa: E402
     is_younglimwon_inventory_frame,
     skus_to_erp_export_frame,
 )
+from instock_ct.erp_import import _resolve_category  # noqa: E402
 from instock_ct.sample_sales import build_sample_weekly_sales, weekly_sales_to_dataframe_rows  # noqa: E402
 from instock_ct.expiry_engine import (  # noqa: E402
     build_expiry_alerts,
@@ -167,9 +168,6 @@ def _filter_skus(skus: list[SkuMaster], categories: list[str] | None) -> list[Sk
     return [s for s in skus if s.category in allowed]
 
 
-_CATEGORY_LABEL_TO_CODE = {label: code for code, label in CATEGORIES.items()}
-
-
 def _skus_to_edit_frame(skus: list[SkuMaster]) -> pd.DataFrame:
     return pd.DataFrame(
         [
@@ -227,9 +225,11 @@ def _parse_edit_frame(frame: pd.DataFrame) -> tuple[list[SkuMaster] | None, list
             continue
         seen_ids.add(sku_id)
 
-        if not category_label or category_label not in _CATEGORY_LABEL_TO_CODE:
-            errors.append(f"{row_no}행 ({sku_id}): 카테고리를 목록에서 선택하세요.")
+        if not category_label:
+            errors.append(f"{row_no}행 ({sku_id}): 카테고리를 입력하세요.")
             continue
+
+        cat_code, cat_label = _resolve_category(category_label)
 
         try:
             on_hand = _to_float(row.get("현재고", 0))
@@ -266,8 +266,8 @@ def _parse_edit_frame(frame: pd.DataFrame) -> tuple[list[SkuMaster] | None, list
             SkuMaster(
                 sku_id=sku_id,
                 name=name,
-                category=_CATEGORY_LABEL_TO_CODE[category_label],
-                category_label=category_label,
+                category=cat_code,
+                category_label=cat_label,
                 on_hand=on_hand,
                 avg_daily_demand=avg_daily,
                 lead_time_days=lead_time,
@@ -301,8 +301,8 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
 
     with st.expander("📥 대량 가져오기 (CSV / Excel)", expanded=len(skus) < 30):
         st.caption(
-            "ERP·영림원·최소 4컬럼(품목코드·품명·현재고·일평균출고) 형식을 지원합니다. "
-            "파일을 올리면 아래 표에 바로 반영됩니다."
+            "ERP·영림원·최소 4컬럼 형식을 지원합니다. "
+            "카테고리는 **품목분류2** 값이 우선 반영됩니다(없으면 품목분류1·카테고리)."
         )
         bulk_preset = st.radio(
             "파일 형식",
@@ -390,7 +390,6 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
         st.info("품목이 많으면 표 스크롤·저장에 시간이 걸릴 수 있습니다. 대량 수정은 CSV 가져오기를 권장합니다.")
 
     editor_height = 520 if len(skus) > 80 else None
-    category_options = list(CATEGORIES.values())
     editor_kwargs: dict = {
         "num_rows": "dynamic",
         "use_container_width": True,
@@ -398,9 +397,9 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
         "column_config": {
             "품목코드": st.column_config.TextColumn("품목코드", required=True, width="small"),
             "품명": st.column_config.TextColumn("품명", required=True, width="medium"),
-            "카테고리": st.column_config.SelectboxColumn(
+            "카테고리": st.column_config.TextColumn(
                 "카테고리",
-                options=category_options,
+                help="ERP 품목분류2 값 (가져오기 시 자동 입력)",
                 required=True,
                 width="medium",
             ),
