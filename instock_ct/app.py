@@ -67,6 +67,11 @@ from instock_ct.erp_import import (  # noqa: E402
 )
 from instock_ct.erp_import import _resolve_category  # noqa: E402
 from instock_ct.sample_sales import build_sample_weekly_sales, weekly_sales_to_dataframe_rows  # noqa: E402
+from instock_ct.browser_persist import (  # noqa: E402
+    clear_browser_storage,
+    ensure_browser_storage_restored,
+    persist_browser_storage,
+)
 from instock_ct.expiry_engine import (  # noqa: E402
     build_expiry_alerts,
     expiry_label,
@@ -153,7 +158,18 @@ def _render_sidebar() -> tuple[float, str | None]:
         format_func=lambda key: CATEGORIES[key],
     )
     if st.sidebar.button("샘플 SKU 초기화", use_container_width=True):
+        clear_browser_storage()
         st.session_state.skus = [copy.deepcopy(s) for s in DEFAULT_SKUS]
+        st.session_state.imported_sales = None
+        _bump_data_editor("master_editor")
+        persist_browser_storage()
+        st.rerun()
+    st.sidebar.caption(f"💾 이 브라우저에 {len(st.session_state.skus)}건 자동 저장")
+    if st.sidebar.button("브라우저 저장 삭제", use_container_width=True):
+        clear_browser_storage()
+        st.session_state.skus = [copy.deepcopy(s) for s in DEFAULT_SKUS]
+        st.session_state.imported_sales = None
+        st.session_state._browser_storage_ready = True
         _bump_data_editor("master_editor")
         st.rerun()
     st.sidebar.markdown("---")
@@ -317,7 +333,8 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
         st.caption(
             "ERP·영림원·최소 4컬럼 형식을 지원합니다. "
             "카테고리는 **품목분류2** 값이 우선 반영됩니다. "
-            "가져온 **일평균출고**는 ④ 수요 예측·② 발주에 자동 연동됩니다."
+            "가져온 **일평균출고**는 ④ 수요 예측·② 발주에 자동 연동됩니다. "
+            "**이 브라우저에 자동 저장**되어 새로고침·재접속 후에도 유지됩니다."
         )
         bulk_preset = st.radio(
             "파일 형식",
@@ -404,6 +421,7 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
                 if st.session_state.imported_sales:
                     parts.append(f"④ 수요예측 {len(st.session_state.imported_sales)}건 연동")
                 st.session_state.master_save_flash = " · ".join(parts)
+                persist_browser_storage()
                 for warning in report.warnings[:5]:
                     st.warning(warning)
                 st.rerun()
@@ -483,6 +501,7 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
             if sales_count:
                 flash += f" ④ 수요예측 {sales_count}건 연동."
             st.session_state.master_save_flash = flash
+            persist_browser_storage()
             _bump_data_editor("master_editor")
             st.rerun()
 
@@ -840,6 +859,7 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
                     st.info(
                         f"④ 수요 예측 탭에 출고 데이터 {len(st.session_state.imported_sales)}건 연동됨"
                     )
+                persist_browser_storage()
                 for w in report.warnings[:5]:
                     st.warning(w)
                 st.dataframe(skus_to_erp_export_frame(skus).head(10), hide_index=True)
@@ -879,6 +899,7 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
             else:
                 if report.ok:
                     st.session_state.imported_sales = sales
+                    persist_browser_storage()
                     st.success("; ".join(report.messages))
                     st.info("④ 수요 예측 탭에서 이 데이터를 사용합니다.")
                 else:
@@ -1203,7 +1224,12 @@ def _render_active_tab(active_tab: str, skus: list[SkuMaster], target_days: floa
 
 
 def main() -> None:
+    ensure_browser_storage_restored()
     _init_state()
+    if st.session_state.pop("_browser_storage_corrupt", False):
+        st.warning("브라우저 저장 데이터가 손상되어 데모 데이터를 사용합니다.")
+    if st.session_state.pop("_browser_storage_restored", False):
+        st.success(f"브라우저에서 SKU {len(st.session_state.skus)}건을 복원했습니다.")
     target_days, categories = _render_sidebar()
     skus = _filter_skus(_sku_list(), categories)
 
@@ -1224,6 +1250,8 @@ def main() -> None:
         _render_active_tab(active_tab, skus, target_days)
     except Exception as exc:
         st.error(f"탭 로드 오류 ({active_tab}): {exc}")
+
+    persist_browser_storage()
 
     st.markdown("---")
     st.caption(
