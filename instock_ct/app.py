@@ -68,6 +68,7 @@ from instock_ct.erp_import import (  # noqa: E402
 from instock_ct.erp_import import _resolve_category  # noqa: E402
 from instock_ct.sample_sales import build_sample_weekly_sales, weekly_sales_to_dataframe_rows  # noqa: E402
 from instock_ct.browser_persist import (  # noqa: E402
+    browser_persist_available,
     clear_browser_storage,
     ensure_browser_storage_restored,
     persist_browser_storage,
@@ -164,14 +165,15 @@ def _render_sidebar() -> tuple[float, str | None]:
         _bump_data_editor("master_editor")
         persist_browser_storage()
         st.rerun()
-    st.sidebar.caption(f"💾 이 브라우저에 {len(st.session_state.skus)}건 자동 저장")
-    if st.sidebar.button("브라우저 저장 삭제", use_container_width=True):
-        clear_browser_storage()
-        st.session_state.skus = [copy.deepcopy(s) for s in DEFAULT_SKUS]
-        st.session_state.imported_sales = None
-        st.session_state._browser_storage_ready = True
-        _bump_data_editor("master_editor")
-        st.rerun()
+    if browser_persist_available():
+        st.sidebar.caption(f"💾 이 브라우저에 {len(st.session_state.skus)}건 자동 저장")
+        if st.sidebar.button("브라우저 저장 삭제", use_container_width=True):
+            clear_browser_storage()
+            st.session_state.skus = [copy.deepcopy(s) for s in DEFAULT_SKUS]
+            st.session_state.imported_sales = None
+            st.session_state._browser_storage_ready = True
+            _bump_data_editor("master_editor")
+            st.rerun()
     st.sidebar.markdown("---")
     st.sidebar.markdown("**카테고리 비중 (공고 참고)**")
     for code, share in CATEGORY_SHARE.items():
@@ -1228,6 +1230,8 @@ def main() -> None:
     _init_state()
     if st.session_state.pop("_browser_storage_corrupt", False):
         st.warning("브라우저 저장 데이터가 손상되어 데모 데이터를 사용합니다.")
+    if st.session_state.pop("_browser_storage_unavailable", False):
+        st.info("브라우저 자동 저장을 사용할 수 없습니다. CSV 백업을 권장합니다.")
     if st.session_state.pop("_browser_storage_restored", False):
         st.success(f"브라우저에서 SKU {len(st.session_state.skus)}건을 복원했습니다.")
     target_days, categories = _render_sidebar()
