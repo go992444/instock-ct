@@ -14,12 +14,72 @@ from instock_ct.models import SkuMaster, WeeklySales
 logger = logging.getLogger(__name__)
 
 _LOAD_KEY = "instock_browser_storage_load"
-_MAX_STORAGE_WAIT = 5
+_PENDING = "__INSTOCK_PENDING__"
+_NULL = "__INSTOCK_NULL__"
+_ERROR = "__INSTOCK_ERROR__"
 
 try:
     from streamlit_javascript import st_javascript as _st_javascript
 except ImportError:  # pragma: no cover
     _st_javascript = None
+
+
+def _root_local_storage_js() -> str:
+    """Return JS expression for the top-level window localStorage."""
+    return (
+        "(function(){"
+        "var root=window;"
+        "while(root.parent&&root.parent!==root){root=root.parent;}"
+        "return root.localStorage;"
+        "})()"
+    )
+
+
+def _read_storage_js() -> str:
+    key = json.dumps(BROWSER_STORAGE_KEY)
+    return (
+        "(function(){"
+        "try{"
+        f"var store={_root_local_storage_js()};"
+        f"var value=store.getItem({key});"
+        f"if(value===null)return {json.dumps(_NULL)};"
+        "return value;"
+        "}catch(e){"
+        f"return {json.dumps(_ERROR)};"
+        "}"
+        "})()"
+    )
+
+
+def _write_storage_js(payload: str) -> str:
+    key = json.dumps(BROWSER_STORAGE_KEY)
+    encoded_payload = json.dumps(payload)
+    return (
+        "(function(){"
+        "try{"
+        f"var store={_root_local_storage_js()};"
+        f"store.setItem({key},{encoded_payload});"
+        'return "ok";'
+        "}catch(e){"
+        'return "error";'
+        "}"
+        "})()"
+    )
+
+
+def _clear_storage_js() -> str:
+    key = json.dumps(BROWSER_STORAGE_KEY)
+    return (
+        "(function(){"
+        "try{"
+        f"var store={_root_local_storage_js()};"
+        f"store.removeItem({key});"
+        'return "ok";'
+        "}catch(e){"
+        'return "error";'
+        "}"
+        "})()"
+    )
 
 
 def browser_persist_available() -> bool:
@@ -37,9 +97,9 @@ def ensure_browser_storage_restored() -> None:
 
     try:
         stored = _st_javascript(
-            f"localStorage.getItem({json.dumps(BROWSER_STORAGE_KEY)})",
+            _read_storage_js(),
             key=_LOAD_KEY,
-            default="",
+            default=_PENDING,
         )
     except Exception as exc:  # pragma: no cover - component/runtime failures
         logger.warning("browser storage load failed: %s", exc)
@@ -47,19 +107,21 @@ def ensure_browser_storage_restored() -> None:
         st.session_state._browser_storage_unavailable = True
         return
 
-    if stored in (None, ""):
-        waits = st.session_state.get("_storage_wait", 0) + 1
-        st.session_state._storage_wait = waits
-        if waits >= _MAX_STORAGE_WAIT:
-            st.session_state._browser_storage_ready = True
-        return
+    if stored == _PENDING:
+        st.caption("저장된 데이터 불러오는 중…")
+        st.stop()
 
     st.session_state._browser_storage_ready = True
-    if stored == "null":
+
+    if stored == _ERROR:
+        st.session_state._browser_storage_unavailable = True
+        return
+
+    if stored in (_NULL, "", "null"):
         return
 
     try:
-        skus, imported_sales = parse_snapshot(stored)
+        skus, imported_sales = parse_snapshot(str(stored))
     except (json.JSONDecodeError, ValueError, KeyError, TypeError):
         st.session_state._browser_storage_corrupt = True
         return
@@ -70,8 +132,6 @@ def ensure_browser_storage_restored() -> None:
 
 
 def persist_browser_storage() -> None:
-    if not browser_persist_available():
-        return
     skus: list[SkuMaster] = st.session_state.get("skus", [])
     if not skus:
         return
@@ -79,11 +139,7 @@ def persist_browser_storage() -> None:
     payload = snapshot_to_json(skus, imported_sales)
     try:
         components.html(
-            f"""
-            <script>
-            localStorage.setItem({json.dumps(BROWSER_STORAGE_KEY)}, {json.dumps(payload)});
-            </script>
-            """,
+            f"<script>{_write_storage_js(payload)}</script>",
             height=0,
             width=0,
         )
@@ -92,15 +148,9 @@ def persist_browser_storage() -> None:
 
 
 def clear_browser_storage() -> None:
-    if not browser_persist_available():
-        return
     try:
         components.html(
-            f"""
-            <script>
-            localStorage.removeItem({json.dumps(BROWSER_STORAGE_KEY)});
-            </script>
-            """,
+            f"<script>{_clear_storage_js()}</script>",
             height=0,
             width=0,
         )
