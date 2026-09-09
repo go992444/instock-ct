@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import unittest
 
+from instock_ct.browser_persist import _read_storage_js, _write_storage_js
 from instock_ct.browser_storage import parse_snapshot, snapshot_to_json
 from instock_ct.models import SkuMaster, WeeklySales
 
 
 class BrowserStorageTests(unittest.TestCase):
+    def test_storage_js_uses_parent_window(self) -> None:
+        self.assertIn("root.parent", _read_storage_js())
+        self.assertIn("localStorage.setItem", _write_storage_js('{"version":1}'))
+
     def test_snapshot_roundtrip(self) -> None:
         skus = [
             SkuMaster(
