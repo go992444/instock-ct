@@ -127,6 +127,14 @@ def _data_editor_key(name: str) -> str:
     return f"{name}_v{st.session_state.get(f'{name}_rev', 0)}"
 
 
+def _file_uploader_key(name: str) -> str:
+    return f"{name}_v{st.session_state.get(f'{name}_rev', 0)}"
+
+
+def _reset_file_uploader(name: str) -> None:
+    st.session_state[f"{name}_rev"] = st.session_state.get(f"{name}_rev", 0) + 1
+
+
 def _sku_list() -> list[SkuMaster]:
     return st.session_state.skus
 
@@ -336,8 +344,8 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
         st.caption(
             "ERP·영림원·최소 4컬럼 형식을 지원합니다. "
             "카테고리는 **품목분류2** 값이 우선 반영됩니다. "
-            "가져온 **일평균출고**는 ④ 수요 예측·② 발주에 자동 연동됩니다. "
-            "**이 브라우저에 자동 저장**되어 새로고침·재접속 후에도 유지됩니다."
+            "파일 선택 후 **가져오기 실행**을 누르세요. "
+            "가져온 **일평균출고**는 ④ 수요 예측·② 발주에 자동 연동됩니다."
         )
         bulk_preset = st.radio(
             "파일 형식",
@@ -392,9 +400,16 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
         bulk_file = st.file_uploader(
             "재고 CSV / Excel (.xlsx)",
             type=["csv", "xlsx", "xls"],
-            key="master_bulk_inv",
+            key=_file_uploader_key("master_bulk_inv"),
         )
-        if bulk_file is not None:
+        run_bulk_import = st.button(
+            "가져오기 실행",
+            type="primary",
+            use_container_width=True,
+            key="master_bulk_run",
+            disabled=bulk_file is None,
+        )
+        if run_bulk_import and bulk_file is not None:
             raw = read_uploaded_table(bulk_file)
             imported, report = parse_inventory_upload(
                 bulk_file,
@@ -413,6 +428,7 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
                     period_days=float(master_ylw_period),
                 ) or None
                 _bump_data_editor("master_editor")
+                _reset_file_uploader("master_bulk_inv")
                 parts = [f"파일 {len(imported)}건 처리"]
                 if stats["added"]:
                     parts.append(f"신규 {stats['added']}건")
@@ -837,9 +853,16 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
         inv_file = st.file_uploader(
             "재고 CSV / Excel (.xlsx)",
             type=["csv", "xlsx", "xls"],
-            key="erp_inv",
+            key=_file_uploader_key("erp_inv"),
         )
-        if inv_file is not None:
+        run_inv_import = st.button(
+            "재고 가져오기 실행",
+            type="primary",
+            use_container_width=True,
+            key="erp_inv_run",
+            disabled=inv_file is None,
+        )
+        if run_inv_import and inv_file is not None:
             raw = read_uploaded_table(inv_file)
             skus, report = parse_inventory_upload(
                 inv_file,
@@ -857,6 +880,7 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
                     period_days=float(ylw_period),
                 ) or None
                 _bump_data_editor("master_editor")
+                _reset_file_uploader("erp_inv")
                 st.success("; ".join(report.messages))
                 if st.session_state.imported_sales:
                     st.info(
@@ -886,9 +910,16 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
         ship_file = st.file_uploader(
             "출고 CSV / Excel",
             type=["csv", "xlsx", "xls"],
-            key="erp_ship",
+            key=_file_uploader_key("erp_ship"),
         )
-        if ship_file is not None:
+        run_ship_import = st.button(
+            "출고 가져오기 실행",
+            type="primary",
+            use_container_width=True,
+            key="erp_ship_run",
+            disabled=ship_file is None,
+        )
+        if run_ship_import and ship_file is not None:
             try:
                 raw = read_uploaded_table(ship_file)
                 sales, report = parse_sales_upload(
@@ -902,6 +933,7 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
             else:
                 if report.ok:
                     st.session_state.imported_sales = sales
+                    _reset_file_uploader("erp_ship")
                     persist_session_data()
                     st.success("; ".join(report.messages))
                     st.info("④ 수요 예측 탭에서 이 데이터를 사용합니다.")
