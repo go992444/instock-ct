@@ -67,11 +67,11 @@ from instock_ct.erp_import import (  # noqa: E402
 )
 from instock_ct.erp_import import _resolve_category  # noqa: E402
 from instock_ct.sample_sales import build_sample_weekly_sales, weekly_sales_to_dataframe_rows  # noqa: E402
-from instock_ct.browser_persist import (  # noqa: E402
-    browser_persist_available,
-    clear_browser_storage,
-    ensure_browser_storage_restored,
-    persist_browser_storage,
+from instock_ct.session_persist import (  # noqa: E402
+    clear_session_data,
+    ensure_session_restored,
+    persist_session_data,
+    session_persist_available,
 )
 from instock_ct.expiry_engine import (  # noqa: E402
     build_expiry_alerts,
@@ -159,18 +159,19 @@ def _render_sidebar() -> tuple[float, str | None]:
         format_func=lambda key: CATEGORIES[key],
     )
     if st.sidebar.button("샘플 SKU 초기화", use_container_width=True):
-        clear_browser_storage()
+        clear_session_data()
         st.session_state.skus = [copy.deepcopy(s) for s in DEFAULT_SKUS]
         st.session_state.imported_sales = None
         _bump_data_editor("master_editor")
-        persist_browser_storage()
+        persist_session_data()
         st.rerun()
-    if browser_persist_available():
-        st.sidebar.caption(f"💾 이 브라우저에 {len(st.session_state.skus)}건 자동 저장")
-        if st.sidebar.button("브라우저 저장 삭제", use_container_width=True):
-            clear_browser_storage()
+    if session_persist_available():
+        st.sidebar.caption(f"💾 자동 저장 · {len(st.session_state.skus)}건")
+        if st.sidebar.button("저장 데이터 삭제", use_container_width=True):
+            clear_session_data()
             st.session_state.skus = [copy.deepcopy(s) for s in DEFAULT_SKUS]
             st.session_state.imported_sales = None
+            st.session_state._session_persist_ready = True
             st.session_state._browser_storage_ready = True
             _bump_data_editor("master_editor")
             st.rerun()
@@ -423,7 +424,7 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
                 if st.session_state.imported_sales:
                     parts.append(f"④ 수요예측 {len(st.session_state.imported_sales)}건 연동")
                 st.session_state.master_save_flash = " · ".join(parts)
-                persist_browser_storage()
+                persist_session_data()
                 for warning in report.warnings[:5]:
                     st.warning(warning)
                 st.rerun()
@@ -503,7 +504,7 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
             if sales_count:
                 flash += f" ④ 수요예측 {sales_count}건 연동."
             st.session_state.master_save_flash = flash
-            persist_browser_storage()
+            persist_session_data()
             _bump_data_editor("master_editor")
             st.rerun()
 
@@ -861,7 +862,7 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
                     st.info(
                         f"④ 수요 예측 탭에 출고 데이터 {len(st.session_state.imported_sales)}건 연동됨"
                     )
-                persist_browser_storage()
+                persist_session_data()
                 for w in report.warnings[:5]:
                     st.warning(w)
                 st.dataframe(skus_to_erp_export_frame(skus).head(10), hide_index=True)
@@ -901,7 +902,7 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
             else:
                 if report.ok:
                     st.session_state.imported_sales = sales
-                    persist_browser_storage()
+                    persist_session_data()
                     st.success("; ".join(report.messages))
                     st.info("④ 수요 예측 탭에서 이 데이터를 사용합니다.")
                 else:
@@ -1226,14 +1227,14 @@ def _render_active_tab(active_tab: str, skus: list[SkuMaster], target_days: floa
 
 
 def main() -> None:
-    ensure_browser_storage_restored()
+    ensure_session_restored()
     _init_state()
     if st.session_state.pop("_browser_storage_corrupt", False):
-        st.warning("브라우저 저장 데이터가 손상되어 데모 데이터를 사용합니다.")
-    if st.session_state.pop("_browser_storage_unavailable", False):
-        st.info("브라우저 자동 저장을 사용할 수 없습니다. CSV 백업을 권장합니다.")
-    if st.session_state.pop("_browser_storage_restored", False):
-        st.success(f"브라우저에서 SKU {len(st.session_state.skus)}건을 복원했습니다.")
+        st.warning("저장 데이터가 손상되어 데모 데이터를 사용합니다.")
+    if st.session_state.pop("_session_persist_restored", False):
+        source = st.session_state.pop("_session_persist_source", "server")
+        label = "서버" if source == "server" else "브라우저"
+        st.success(f"{label}에서 SKU {len(st.session_state.skus)}건을 복원했습니다.")
     target_days, categories = _render_sidebar()
     skus = _filter_skus(_sku_list(), categories)
 
@@ -1255,7 +1256,7 @@ def main() -> None:
     except Exception as exc:
         st.error(f"탭 로드 오류 ({active_tab}): {exc}")
 
-    persist_browser_storage()
+    persist_session_data()
 
     st.markdown("---")
     st.caption(

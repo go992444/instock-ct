@@ -24,13 +24,16 @@ except ImportError:  # pragma: no cover
     _st_javascript = None
 
 
-def _root_local_storage_js() -> str:
+def _top_local_storage_js() -> str:
     """Return JS expression for the top-level window localStorage."""
     return (
         "(function(){"
+        "try{return window.top.localStorage;}"
+        "catch(e){"
         "var root=window;"
         "while(root.parent&&root.parent!==root){root=root.parent;}"
         "return root.localStorage;"
+        "}"
         "})()"
     )
 
@@ -40,7 +43,7 @@ def _read_storage_js() -> str:
     return (
         "(function(){"
         "try{"
-        f"var store={_root_local_storage_js()};"
+        f"var store={_top_local_storage_js()};"
         f"var value=store.getItem({key});"
         f"if(value===null)return {json.dumps(_NULL)};"
         "return value;"
@@ -57,7 +60,7 @@ def _write_storage_js(payload: str) -> str:
     return (
         "(function(){"
         "try{"
-        f"var store={_root_local_storage_js()};"
+        f"var store={_top_local_storage_js()};"
         f"store.setItem({key},{encoded_payload});"
         'return "ok";'
         "}catch(e){"
@@ -72,7 +75,7 @@ def _clear_storage_js() -> str:
     return (
         "(function(){"
         "try{"
-        f"var store={_root_local_storage_js()};"
+        f"var store={_top_local_storage_js()};"
         f"store.removeItem({key});"
         'return "ok";'
         "}catch(e){"
@@ -117,7 +120,7 @@ def ensure_browser_storage_restored() -> None:
         st.session_state._browser_storage_unavailable = True
         return
 
-    if stored in (_NULL, "", "null"):
+    if stored in (_NULL, "", "null", None):
         return
 
     try:
@@ -137,22 +140,34 @@ def persist_browser_storage() -> None:
         return
     imported_sales: list[WeeklySales] | None = st.session_state.get("imported_sales")
     payload = snapshot_to_json(skus, imported_sales)
+    script = _write_storage_js(payload)
+    if _st_javascript is not None:
+        try:
+            _st_javascript(script, key="instock_browser_storage_write")
+        except Exception as exc:  # pragma: no cover
+            logger.warning("browser storage save (js) failed: %s", exc)
     try:
         components.html(
-            f"<script>{_write_storage_js(payload)}</script>",
+            f"<script>{script}</script>",
             height=0,
             width=0,
         )
     except Exception as exc:  # pragma: no cover
-        logger.warning("browser storage save failed: %s", exc)
+        logger.warning("browser storage save (html) failed: %s", exc)
 
 
 def clear_browser_storage() -> None:
+    script = _clear_storage_js()
+    if _st_javascript is not None:
+        try:
+            _st_javascript(script, key="instock_browser_storage_clear")
+        except Exception as exc:  # pragma: no cover
+            logger.warning("browser storage clear (js) failed: %s", exc)
     try:
         components.html(
-            f"<script>{_clear_storage_js()}</script>",
+            f"<script>{script}</script>",
             height=0,
             width=0,
         )
     except Exception as exc:  # pragma: no cover
-        logger.warning("browser storage clear failed: %s", exc)
+        logger.warning("browser storage clear (html) failed: %s", exc)
