@@ -61,7 +61,7 @@ def _clear_storage_js() -> str:
         "(function(){"
         "try{"
         f"localStorage.removeItem({key});"
-        'return "ok";"
+        'return "ok";'
         "}catch(e){"
         'return "error";'
         "}"
