@@ -70,7 +70,9 @@ from instock_ct.sample_sales import build_sample_weekly_sales, weekly_sales_to_d
 from instock_ct.session_persist import (  # noqa: E402
     clear_session_data,
     ensure_session_restored,
+    mark_persist_dirty,
     persist_session_data,
+    persist_status_label,
     session_persist_available,
 )
 from instock_ct.expiry_engine import (  # noqa: E402
@@ -135,6 +137,11 @@ def _reset_file_uploader(name: str) -> None:
     st.session_state[f"{name}_rev"] = st.session_state.get(f"{name}_rev", 0) + 1
 
 
+def _save_session() -> None:
+    mark_persist_dirty()
+    persist_session_data()
+
+
 def _sku_list() -> list[SkuMaster]:
     return st.session_state.skus
 
@@ -171,10 +178,10 @@ def _render_sidebar() -> tuple[float, str | None]:
         st.session_state.skus = [copy.deepcopy(s) for s in DEFAULT_SKUS]
         st.session_state.imported_sales = None
         _bump_data_editor("master_editor")
-        persist_session_data()
         st.rerun()
     if session_persist_available():
-        st.sidebar.caption(f"💾 자동 저장 · {len(st.session_state.skus)}건")
+        st.sidebar.caption(persist_status_label())
+        st.sidebar.caption("같은 브라우저·같은 주소(URL)로 다시 열면 데이터가 복원됩니다.")
         if st.sidebar.button("저장 데이터 삭제", use_container_width=True):
             clear_session_data()
             st.session_state.skus = [copy.deepcopy(s) for s in DEFAULT_SKUS]
@@ -440,7 +447,7 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
                 if st.session_state.imported_sales:
                     parts.append(f"④ 수요예측 {len(st.session_state.imported_sales)}건 연동")
                 st.session_state.master_save_flash = " · ".join(parts)
-                persist_session_data()
+                _save_session()
                 for warning in report.warnings[:5]:
                     st.warning(warning)
                 st.rerun()
@@ -520,7 +527,7 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
             if sales_count:
                 flash += f" ④ 수요예측 {sales_count}건 연동."
             st.session_state.master_save_flash = flash
-            persist_session_data()
+            _save_session()
             _bump_data_editor("master_editor")
             st.rerun()
 
@@ -886,7 +893,7 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
                     st.info(
                         f"④ 수요 예측 탭에 출고 데이터 {len(st.session_state.imported_sales)}건 연동됨"
                     )
-                persist_session_data()
+                _save_session()
                 for w in report.warnings[:5]:
                     st.warning(w)
                 st.dataframe(skus_to_erp_export_frame(skus).head(10), hide_index=True)
@@ -934,7 +941,7 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
                 if report.ok:
                     st.session_state.imported_sales = sales
                     _reset_file_uploader("erp_ship")
-                    persist_session_data()
+                    _save_session()
                     st.success("; ".join(report.messages))
                     st.info("④ 수요 예측 탭에서 이 데이터를 사용합니다.")
                 else:
@@ -1287,8 +1294,6 @@ def main() -> None:
         _render_active_tab(active_tab, skus, target_days)
     except Exception as exc:
         st.error(f"탭 로드 오류 ({active_tab}): {exc}")
-
-    persist_session_data()
 
     st.markdown("---")
     st.caption(
