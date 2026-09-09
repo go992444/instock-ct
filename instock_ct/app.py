@@ -70,11 +70,14 @@ from instock_ct.sample_sales import build_sample_weekly_sales, weekly_sales_to_d
 from instock_ct.session_persist import (  # noqa: E402
     clear_session_data,
     ensure_session_restored,
+    is_demo_skus,
     mark_persist_dirty,
     persist_result_message,
     persist_session_data,
     persist_status_label,
+    render_persist_flash,
     session_persist_available,
+    set_persist_flash,
 )
 from instock_ct.expiry_engine import (  # noqa: E402
     build_expiry_alerts,
@@ -140,7 +143,9 @@ def _reset_file_uploader(name: str) -> None:
 
 def _save_session() -> bool:
     mark_persist_dirty()
-    return persist_session_data()
+    saved = persist_session_data()
+    set_persist_flash(saved)
+    return saved
 
 
 def _sku_list() -> list[SkuMaster]:
@@ -182,6 +187,16 @@ def _render_sidebar() -> tuple[float, str | None]:
         st.rerun()
     if session_persist_available():
         st.sidebar.caption(persist_status_label())
+        if st.sidebar.button("💾 지금 저장", use_container_width=True):
+            if is_demo_skus(_sku_list()):
+                st.sidebar.warning("데모 데이터는 저장하지 않습니다.")
+            else:
+                saved = _save_session()
+                if saved:
+                    st.sidebar.success("저장 완료")
+                else:
+                    st.sidebar.error("저장 실패")
+                st.rerun()
         st.sidebar.caption("같은 브라우저·같은 주소(URL)로 다시 열면 데이터가 복원됩니다.")
         if st.sidebar.button("저장 데이터 삭제", use_container_width=True):
             clear_session_data()
@@ -345,6 +360,7 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
     st.caption("표에서 값을 수정한 뒤 **변경사항 저장** — 다른 탭에 즉시 반영됩니다. 행 추가·삭제도 가능합니다.")
 
     flash = st.session_state.pop("master_save_flash", None)
+    render_persist_flash()
     if flash:
         st.success(flash)
 
@@ -1275,7 +1291,9 @@ def main() -> None:
         st.warning("저장 데이터가 손상되어 데모 데이터를 사용합니다.")
     if st.session_state.pop("_session_persist_restored", False):
         source = st.session_state.pop("_session_persist_source", "server")
-        label = {"server": "서버", "global": "저장소", "browser": "브라우저"}.get(source, "서버")
+        label = {"server": "서버", "global": "저장소", "sqlite": "저장소", "browser": "브라우저"}.get(
+            source, "서버"
+        )
         st.success(f"{label}에서 SKU {len(st.session_state.skus)}건을 복원했습니다.")
     target_days, categories = _render_sidebar()
     skus = _filter_skus(_sku_list(), categories)

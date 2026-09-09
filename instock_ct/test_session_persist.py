@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
 import uuid
+from pathlib import Path
 
+from instock_ct.config import DEFAULT_SKUS
 from instock_ct.models import SkuMaster
 from instock_ct.session_persist import (
     GLOBAL_SNAPSHOT_PATH,
-    PERSIST_DIR,
+    SQLITE_PATH,
     delete_server_snapshot,
     is_demo_skus,
     load_server_snapshot,
     save_server_snapshot,
 )
-from instock_ct.config import DEFAULT_SKUS
 
 
 class SessionPersistTests(unittest.TestCase):
@@ -25,12 +27,12 @@ class SessionPersistTests(unittest.TestCase):
         self.persist_dir.mkdir(parents=True, exist_ok=True)
 
     def tearDown(self) -> None:
-        from instock_ct.session_persist import GLOBAL_SNAPSHOT_PATH
-
         for path in self.persist_dir.glob("*.json"):
             path.unlink(missing_ok=True)
         if GLOBAL_SNAPSHOT_PATH.is_file():
             GLOBAL_SNAPSHOT_PATH.unlink(missing_ok=True)
+        if SQLITE_PATH.is_file():
+            SQLITE_PATH.unlink(missing_ok=True)
 
     def test_server_snapshot_roundtrip(self) -> None:
         client_id = str(uuid.uuid4())
@@ -48,13 +50,14 @@ class SessionPersistTests(unittest.TestCase):
                 safety_stock_days=7,
             )
         ]
-        save_server_snapshot(client_id, skus, None)
+        self.assertTrue(save_server_snapshot(client_id, skus, None))
         restored = load_server_snapshot(client_id)
         self.assertIsNotNone(restored)
         assert restored is not None
-        restored_skus, _ = restored
+        restored_skus, _, source = restored
         self.assertEqual(restored_skus[0].sku_id, "ENP00001")
         self.assertEqual(restored_skus[0].on_hand, -3.0)
+        self.assertIn(source, {"sqlite", "server", "global"})
 
         delete_server_snapshot(client_id)
         self.assertIsNone(load_server_snapshot(client_id))
@@ -93,13 +96,12 @@ class SessionPersistTests(unittest.TestCase):
                 safety_stock_days=7,
             )
         ]
-        save_server_snapshot(client_id, skus, None)
-        self.assertTrue(GLOBAL_SNAPSHOT_PATH.is_file())
+        self.assertTrue(save_server_snapshot(client_id, skus, None))
         other_id = str(uuid.uuid4())
         restored = load_server_snapshot(other_id)
         self.assertIsNotNone(restored)
         assert restored is not None
-        restored_skus, _ = restored
+        restored_skus, _, _ = restored
         self.assertEqual(restored_skus[0].sku_id, "ENP00099")
 
 
