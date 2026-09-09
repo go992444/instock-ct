@@ -23,7 +23,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from instock_ct.config import (  # noqa: E402
     CATEGORIES,
-    CATEGORY_SHARE,
     DEFAULT_SKUS,
     DEFAULT_TARGET_COVERAGE_DAYS,
     EXPIRY_CRITICAL_DAYS,
@@ -162,6 +161,20 @@ def _fmt_num(value: float, digits: int = 1) -> str:
     return f"{value:.{digits}f}"
 
 
+def _category_shares(skus: list[SkuMaster]) -> list[tuple[str, float, int]]:
+    """Return (label, share, count) sorted by count descending."""
+    if not skus:
+        return []
+    counts: dict[str, int] = {}
+    for sku in skus:
+        label = (sku.category_label or CATEGORIES.get(sku.category, sku.category)).strip()
+        counts[label] = counts.get(label, 0) + 1
+    total = len(skus)
+    rows = [(label, count / total, count) for label, count in counts.items()]
+    rows.sort(key=lambda row: (-row[2], row[0]))
+    return rows
+
+
 def _render_sidebar() -> tuple[float, str | None]:
     st.sidebar.header("Instock CT")
     st.sidebar.caption("Medi Market형 B2B 의료 소모품 · 발주·재고 시범")
@@ -207,9 +220,13 @@ def _render_sidebar() -> tuple[float, str | None]:
             _bump_data_editor("master_editor")
             st.rerun()
     st.sidebar.markdown("---")
-    st.sidebar.markdown("**카테고리 비중 (공고 참고)**")
-    for code, share in CATEGORY_SHARE.items():
-        st.sidebar.progress(share, text=f"{CATEGORIES[code]} {share:.0%}")
+    st.sidebar.markdown(f"**카테고리 비중 (현재 {len(_sku_list())}건)**")
+    shares = _category_shares(_sku_list())
+    if shares:
+        for label, share, count in shares:
+            st.sidebar.progress(share, text=f"{label} {share:.0%} · {count}건")
+    else:
+        st.sidebar.caption("표시할 품목이 없습니다.")
     return float(target_days), category_filter or None
 
 
