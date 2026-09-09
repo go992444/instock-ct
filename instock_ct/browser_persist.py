@@ -61,7 +61,7 @@ def _clear_storage_js() -> str:
         "(function(){"
         "try{"
         f"localStorage.removeItem({key});"
-        'return "ok";'
+        'return "ok";"
         "}catch(e){"
         'return "error";'
         "}"
@@ -71,6 +71,30 @@ def _clear_storage_js() -> str:
 
 def browser_persist_available() -> bool:
     return _st_javascript is not None
+
+
+def queue_browser_save(skus: list[SkuMaster], imported_sales: list[WeeklySales] | None) -> None:
+    st.session_state._browser_save_payload = snapshot_to_json(skus, imported_sales)
+
+
+def flush_browser_save_if_pending() -> None:
+    payload = st.session_state.get("_browser_save_payload")
+    if not payload or _st_javascript is None:
+        return
+    try:
+        result = _st_javascript(
+            _write_storage_js(str(payload)),
+            key=_WRITE_KEY,
+            default=_PENDING,
+        )
+    except Exception as exc:  # pragma: no cover
+        logger.warning("browser storage flush failed: %s", exc)
+        return
+    if result == _PENDING:
+        st.caption("브라우저에 저장하는 중…")
+        st.stop()
+    if result == "ok":
+        st.session_state.pop("_browser_save_payload", None)
 
 
 def ensure_browser_storage_restored() -> None:
@@ -119,24 +143,33 @@ def ensure_browser_storage_restored() -> None:
 
 
 def persist_browser_storage() -> bool:
-    skus: list[SkuMaster] = st.session_state.get("skus", [])
-    if not skus or _st_javascript is None:
+    payload = st.session_state.get("_browser_save_payload")
+    if not payload or _st_javascript is None:
+        skus: list[SkuMaster] = st.session_state.get("skus", [])
+        if not skus:
+            return False
+        imported_sales: list[WeeklySales] | None = st.session_state.get("imported_sales")
+        queue_browser_save(skus, imported_sales)
+        payload = st.session_state.get("_browser_save_payload")
+    if not payload:
         return False
-    imported_sales: list[WeeklySales] | None = st.session_state.get("imported_sales")
-    payload = snapshot_to_json(skus, imported_sales)
     try:
         result = _st_javascript(
-            _write_storage_js(payload),
+            _write_storage_js(str(payload)),
             key=_WRITE_KEY,
             default=_PENDING,
         )
     except Exception as exc:  # pragma: no cover
         logger.warning("browser storage save failed: %s", exc)
         return False
-    return result == "ok"
+    if result == "ok":
+        st.session_state.pop("_browser_save_payload", None)
+        return True
+    return False
 
 
 def clear_browser_storage() -> None:
+    st.session_state.pop("_browser_save_payload", None)
     if _st_javascript is None:
         return
     try:
