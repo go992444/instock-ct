@@ -1336,11 +1336,18 @@ def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
 
     uploaded = None
     preset = st.session_state.get("forecast_preset", "erp_korean")
-    with st.expander("주간 출고 CSV 추가 업로드 (선택)", expanded=False):
-        st.caption("별도 주간 이력 CSV가 있을 때만 사용하세요. 없으면 마스터·ERP 데이터를 자동 사용합니다.")
-        uploaded = st.file_uploader("주간 출고 CSV", type=["csv"], key="forecast_upload")
+    with st.expander("주간 출고 CSV / Excel 추가 업로드 (선택)", expanded=False):
+        st.caption(
+            "별도 주간 이력 또는 **영림원 재고현황(2.xlsx)** 을 올릴 수 있습니다. "
+            "없으면 마스터·ERP 데이터를 자동 사용합니다."
+        )
+        uploaded = st.file_uploader(
+            "주간 출고 CSV / Excel",
+            type=["csv", "xlsx", "xls"],
+            key="forecast_upload",
+        )
         preset = st.radio(
-            "CSV 형식",
+            "파일 형식",
             options=list(PRESET_LABELS.keys()),
             format_func=lambda k: PRESET_LABELS[k],
             horizontal=True,
@@ -1363,7 +1370,12 @@ def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
         else:
             if preset != "erp_korean" and is_korean_sales_frame(raw):
                 st.info("한글 컬럼(품목코드·주간시작일·출고수량)이 감지되어 ERP 한글 형식으로 읽습니다.")
-            sales, report = parse_sales_upload(raw, preset=preset)
+            sales, report = parse_sales_upload(
+                raw,
+                preset=preset,
+                min_outbound=float(st.session_state.get("ylw_min_outbound", 10.0)),
+                period_days=float(st.session_state.get("ylw_period_days", 30.0)),
+            )
         if not report.ok:
             st.error("; ".join(report.messages))
             return
