@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from instock_ct.config import CATEGORIES, DEFAULT_SKUS
-from instock_ct.models import SkuMaster, WeeklySales
+from instock_ct.models import ExpiryLot, SkuMaster, WeeklySales
 
 try:
     from instock_ct.expiry_engine import parse_expiry_date
@@ -87,6 +87,26 @@ ERP_KOREAN_SALES_MAP: dict[str, str] = {
     "출고수량": "qty",
     "수량": "qty",
     "qty": "qty",
+}
+
+WMS_EXPIRY_MAP: dict[str, str] = {
+    "품목코드": "sku_id",
+    "품목번호": "sku_id",
+    "상품코드": "sku_id",
+    "sku": "sku_id",
+    "sku_id": "sku_id",
+    "유통기한": "expiry_date",
+    "소비기한": "expiry_date",
+    "유효기간": "expiry_date",
+    "expiration_date": "expiry_date",
+    "expiry_date": "expiry_date",
+    "수량": "qty",
+    "재고수량": "qty",
+    "재고": "qty",
+    "qty": "qty",
+    "lot수량": "qty",
+    "LOT수량": "qty",
+    "현재고": "qty",
 }
 
 CATEGORY_LABEL_TO_CODE: dict[str, str] = {
@@ -198,6 +218,14 @@ def is_inventory_export_frame(frame: pd.DataFrame) -> bool:
     return has_sku and has_stock and has_name and not is_korean_sales_frame(frame)
 
 
+def is_wms_expiry_frame(frame: pd.DataFrame) -> bool:
+    cols = {str(column).strip() for column in frame.columns}
+    has_sku = bool(cols & {"품목코드", "품목번호", "상품코드", "sku_id", "sku"})
+    has_expiry = bool(cols & {"유통기한", "소비기한", "유효기간", "expiration_date", "expiry_date"})
+    has_qty = bool(cols & {"수량", "재고수량", "재고", "qty", "LOT수량", "lot수량"})
+    return has_sku and has_expiry and has_qty
+
+
 def read_uploaded_csv(upload) -> pd.DataFrame:
     """Read CSV upload with common Korean ERP encodings."""
     raw = upload.getvalue()
@@ -214,7 +242,21 @@ def read_uploaded_table(upload) -> pd.DataFrame:
     """Read CSV or Excel upload into a DataFrame."""
     name = str(getattr(upload, "name", "") or "").lower()
     if name.endswith((".xlsx", ".xls")):
-        return pd.read_excel(upload, header=1)
+        raw = upload.getvalue()
+        upload.seek(0)
+        engine = "xlrd" if name.endswith(".xls") else None
+        for header in (0, 1):
+            frame = _normalize_columns(
+                pd.read_excel(io.BytesIO(raw), header=header, engine=engine)
+            )
+            if (
+                is_younglimwon_inventory_frame(frame)
+                or is_wms_expiry_frame(frame)
+                or is_korean_sales_frame(frame)
+                or is_inventory_export_frame(frame)
+            ):
+                return frame
+        return _normalize_columns(pd.read_excel(io.BytesIO(raw), header=0, engine=engine))
     return read_uploaded_csv(upload)
 
 
@@ -544,6 +586,118 @@ def parse_native_sales_frame(frame: pd.DataFrame) -> tuple[list[WeeklySales], Im
     else:
         report.messages.append("읽을 수 있는 출고 행이 없습니다.")
     return sales, report
+
+
+def parse_wms_expiry_lots(frame: pd.DataFrame) -> tuple[list[ExpiryLot], ImportReport]:
+    """Parse outsourced WMS export: SKU + expiry date + qty per row."""
+    frame = _normalize_columns(frame)
+    mapped = _rename_with_map(frame, WMS_EXPIRY_MAP)
+    mapped.columns = [str(c).lower() for c in mapped.columns]
+
+    required = {"sku_id", "expiry_date", "qty"}
+    missing = required - set(mapped.columns)
+    report = ImportReport(ok=not missing, row_count=len(mapped), messages=[], warnings=[])
+    if missing:
+        report.messages.append(f"필수 컬럼 누락: {', '.join(sorted(missing))}")
+        report.messages.append("필요: 품목코드(또는 품목번호), 유통기한, 수량")
+        return [], report
+
+    lots: list[ExpiryLot] = []
+    for index, row in mapped.iterrows():
+        sku_id = str(row.get("sku_id", "")).strip()
+        if not sku_id:
+            continue
+        raw_expiry = str(row.get("expiry_date", "")).strip()
+        if not raw_expiry or raw_expiry.lower() in {"none", "nan", "-", "n/a"}:
+            report.warnings.append(f"행 {index + 2} ({sku_id}): 유통기한 없음 — 건너뜀")
+            continue
+        if parse_expiry_date is None or parse_expiry_date(raw_expiry) is None:
+            report.warnings.append(
+                f"행 {index + 2} ({sku_id}): 유통기한 형식 오류 — '{raw_expiry}'"
+            )
+            continue
+        expiry_iso = parse_expiry_date(raw_expiry).isoformat()
+        qty = coerce_float(row.get("qty"), default=None)
+        if qty is None or qty < 0:
+            report.warnings.append(
+                f"행 {index + 2} ({sku_id}): 수량 형식 오류 — '{row.get('qty')}'"
+            )
+            continue
+        lots.append(ExpiryLot(sku_id=sku_id, expiry_date=expiry_iso, qty=qty))
+
+    report.ok = len(lots) > 0
+    report.row_count = len(lots)
+    if lots:
+        sku_count = len({lot.sku_id for lot in lots})
+        report.messages.append(f"WMS 유통기한 {len(lots)}건 ({sku_count} SKU) 로드")
+    else:
+        report.messages.append("읽을 수 있는 유통기한 행이 없습니다.")
+    return lots, report
+
+
+def apply_expiry_lots_to_skus(
+    skus: list[SkuMaster],
+    lots: list[ExpiryLot],
+) -> tuple[list[SkuMaster], ImportReport]:
+    """Match WMS expiry rows to loaded SKUs and attach lot-level quantities."""
+    from dataclasses import replace
+
+    by_sku: dict[str, list[ExpiryLot]] = {}
+    for lot in lots:
+        by_sku.setdefault(lot.sku_id, []).append(lot)
+
+    for sku_id in by_sku:
+        by_sku[sku_id].sort(key=lambda item: item.expiry_date)
+
+    known_ids = {sku.sku_id for sku in skus}
+    unmatched = sorted(set(by_sku) - known_ids)
+
+    updated: list[SkuMaster] = []
+    matched_skus = 0
+    for sku in skus:
+        sku_lots = by_sku.get(sku.sku_id)
+        if not sku_lots:
+            updated.append(replace(sku, expiry_lots=[], nearest_expiry=None, expiring_qty=None))
+            continue
+        nearest = sku_lots[0]
+        updated.append(
+            replace(
+                sku,
+                expiry_lots=list(sku_lots),
+                nearest_expiry=nearest.expiry_date,
+                expiring_qty=nearest.qty,
+            )
+        )
+        matched_skus += 1
+
+    report = ImportReport(
+        ok=matched_skus > 0,
+        row_count=len(lots),
+        messages=[f"유통기한 매칭 {matched_skus} SKU / {len(lots)} LOT 행 적용"],
+        warnings=[],
+    )
+    if unmatched:
+        preview = ", ".join(unmatched[:8])
+        if len(unmatched) > 8:
+            preview += " …"
+        report.warnings.append(
+            f"재고 마스터에 없는 SKU {len(unmatched)}건 — {preview}"
+        )
+    if matched_skus == 0:
+        report.ok = False
+        report.messages.append("매칭된 SKU가 없습니다. 품목코드가 재고 import와 같은지 확인하세요.")
+    return updated, report
+
+
+def build_sample_wms_expiry_csv_bytes() -> bytes:
+    frame = pd.DataFrame(
+        [
+            {"품목코드": "MC-001", "유통기한": "2026-10-15", "수량": 120},
+            {"품목코드": "MC-001", "유통기한": "2026-12-01", "수량": 80},
+            {"품목코드": "MC-013", "유통기한": "2026-09-20", "수량": 42},
+        ]
+    )
+    return frame.to_csv(index=False).encode("utf-8-sig")
 
 
 def skus_to_erp_export_frame(skus: list[SkuMaster]) -> pd.DataFrame:

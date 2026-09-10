@@ -27,12 +27,12 @@ set PORT=8501
 netstat -ano | findstr ":%PORT% " | findstr "LISTENING" >nul
 if not errorlevel 1 (
   echo.
-  echo WARNING: Port %PORT% is already in use.
-  echo Run stop-instock.bat first, or close old Instock CT terminals.
-  echo Multiple instances cause removeChild UI errors.
+  echo Instock CT is already running on port %PORT%.
+  start "" "http://localhost:%PORT%"
+  echo Opened browser. You can close this window.
   echo.
   pause
-  exit /b 1
+  exit /b 0
 )
 
 :run

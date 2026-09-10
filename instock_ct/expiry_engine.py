@@ -9,7 +9,7 @@ from instock_ct.config import (
     EXPIRY_CRITICAL_DAYS,
     EXPIRY_WARNING_DAYS,
 )
-from instock_ct.models import ExpiryAlert, SkuMaster
+from instock_ct.models import ExpiryAlert, ExpiryLot, SkuMaster
 
 
 def get_expiry_thresholds(
@@ -147,6 +147,60 @@ def assess_expiry(
     )
 
 
+def assess_expiry_lot(
+    sku: SkuMaster,
+    lot: ExpiryLot,
+    *,
+    today: date | None = None,
+    critical_days: float | None = None,
+    warning_days: float | None = None,
+    thresholds_by_category: dict[str, tuple[float, float]] | None = None,
+) -> ExpiryAlert | None:
+    remaining = days_until_expiry(lot.expiry_date, today=today)
+    if remaining is None:
+        return None
+
+    if critical_days is None or warning_days is None:
+        crit, warn = get_expiry_thresholds(sku.category, thresholds_by_category)
+    else:
+        crit = max(0.0, float(critical_days))
+        warn = max(crit + 1.0, float(warning_days))
+
+    level = classify_expiry(
+        remaining,
+        critical_days=crit,
+        warning_days=warn,
+    )
+    draft = ExpiryAlert(
+        sku_id=sku.sku_id,
+        name=sku.name,
+        category_label=sku.category_label,
+        on_hand=sku.on_hand,
+        expiring_qty=lot.qty,
+        expiry_date=lot.expiry_date,
+        days_remaining=remaining,
+        risk_level=level,
+        vendor=sku.vendor,
+        action="",
+        critical_threshold_days=crit,
+        warning_threshold_days=warn,
+    )
+    return ExpiryAlert(
+        sku_id=sku.sku_id,
+        name=sku.name,
+        category_label=sku.category_label,
+        on_hand=sku.on_hand,
+        expiring_qty=lot.qty,
+        expiry_date=lot.expiry_date,
+        days_remaining=remaining,
+        risk_level=level,
+        vendor=sku.vendor,
+        action=recommended_expiry_action(draft),
+        critical_threshold_days=crit,
+        warning_threshold_days=warn,
+    )
+
+
 def build_expiry_alerts(
     skus: list[SkuMaster],
     *,
@@ -170,6 +224,49 @@ def build_expiry_alerts(
         if alert:
             alerts.append(alert)
     alerts.sort(key=lambda row: (row.days_remaining, row.sku_id))
+    return alerts
+
+
+def build_expiry_lot_alerts(
+    skus: list[SkuMaster],
+    *,
+    today: date | None = None,
+    thresholds_by_category: dict[str, tuple[float, float]] | None = None,
+    critical_days: float = EXPIRY_CRITICAL_DAYS,
+    warning_days: float = EXPIRY_WARNING_DAYS,
+) -> list[ExpiryAlert]:
+    """Build one alert per WMS lot row; fall back to SKU summary when no lots."""
+    alerts: list[ExpiryAlert] = []
+    for sku in skus:
+        if sku.expiry_lots:
+            for lot in sku.expiry_lots:
+                if thresholds_by_category is not None:
+                    crit, warn = get_expiry_thresholds(sku.category, thresholds_by_category)
+                else:
+                    crit, warn = critical_days, warning_days
+                alert = assess_expiry_lot(
+                    sku,
+                    lot,
+                    today=today,
+                    critical_days=crit,
+                    warning_days=warn,
+                )
+                if alert:
+                    alerts.append(alert)
+            continue
+        if thresholds_by_category is not None:
+            crit, warn = get_expiry_thresholds(sku.category, thresholds_by_category)
+        else:
+            crit, warn = critical_days, warning_days
+        alert = assess_expiry(
+            sku,
+            today=today,
+            critical_days=crit,
+            warning_days=warn,
+        )
+        if alert:
+            alerts.append(alert)
+    alerts.sort(key=lambda row: (row.days_remaining, row.sku_id, row.expiry_date))
     return alerts
 
 

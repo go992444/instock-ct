@@ -46,15 +46,18 @@ from instock_ct.inventory_engine import (  # noqa: E402
 from instock_ct.models import SkuMaster, WeeklySales  # noqa: E402
 from instock_ct.erp_import import (  # noqa: E402
     PRESET_LABELS,
+    apply_expiry_lots_to_skus,
     build_reorder_export_frame,
     build_sample_erp_sku_csv_bytes,
     build_minimal_erp_sku_csv_bytes,
+    build_sample_wms_expiry_csv_bytes,
     coerce_float,
     is_korean_sales_frame,
     parse_native_sales_frame,
     parse_sales_csv,
     parse_sales_upload,
     parse_sku_csv,
+    parse_wms_expiry_lots,
     parse_younglimwon_inventory,
     read_uploaded_table,
     is_younglimwon_inventory_frame,
@@ -62,7 +65,7 @@ from instock_ct.erp_import import (  # noqa: E402
 )
 from instock_ct.sample_sales import build_sample_weekly_sales, weekly_sales_to_dataframe_rows  # noqa: E402
 from instock_ct.expiry_engine import (  # noqa: E402
-    build_expiry_alerts,
+    build_expiry_lot_alerts,
     expiry_label,
     parse_expiry_date,
     summarize_expiry_counts,
@@ -101,8 +104,18 @@ def _init_state() -> None:
         st.session_state.skus = [copy.deepcopy(s) for s in DEFAULT_SKUS]
     if "imported_sales" not in st.session_state:
         st.session_state.imported_sales = None
+    if "expiry_lots" not in st.session_state:
+        st.session_state.expiry_lots = None
     if "master_editor_rev" not in st.session_state:
         st.session_state.master_editor_rev = 0
+
+
+def _reapply_stored_expiry_lots(skus: list[SkuMaster]) -> list[SkuMaster]:
+    lots = st.session_state.get("expiry_lots")
+    if not lots:
+        return skus
+    updated, _ = apply_expiry_lots_to_skus(skus, lots)
+    return updated
 
 
 def _bump_data_editor(name: str) -> None:
@@ -698,7 +711,7 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
             else:
                 skus, report = parse_sku_csv(raw, preset=preset)
             if report.ok:
-                st.session_state.skus = skus
+                st.session_state.skus = _reapply_stored_expiry_lots(skus)
                 _bump_data_editor("master_editor")
                 st.success("; ".join(report.messages))
                 for w in report.warnings[:5]:
@@ -748,6 +761,60 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
                     st.warning(warning)
 
     st.markdown("---")
+    st.markdown("**③ 외주 WMS 유통기한 가져오기**")
+    st.caption(
+        "영림원 재고 파일에는 유통기한이 없을 때 사용합니다. "
+        "WMS export를 올리면 **SKU번호로 매칭**되어 유통기한별 재고 수량이 적용됩니다."
+    )
+    st.download_button(
+        "WMS 유통기한 샘플 CSV",
+        build_sample_wms_expiry_csv_bytes(),
+        file_name="wms_expiry.sample.csv",
+        mime="text/csv",
+    )
+    if st.session_state.get("expiry_lots"):
+        lot_count = len(st.session_state.expiry_lots)
+        sku_count = len({lot.sku_id for lot in st.session_state.expiry_lots})
+        st.info(f"WMS 유통기한 {lot_count} LOT / {sku_count} SKU 적용 중")
+    wms_file = st.file_uploader(
+        "WMS 유통기한 CSV / Excel",
+        type=["csv", "xlsx", "xls"],
+        key="erp_wms_expiry",
+    )
+    if wms_file is not None:
+        try:
+            raw = read_uploaded_table(wms_file)
+            lots, report = parse_wms_expiry_lots(raw)
+        except Exception as exc:
+            st.error(f"파일을 읽을 수 없습니다: {exc}")
+        else:
+            if report.ok:
+                st.session_state.expiry_lots = lots
+                updated, match_report = apply_expiry_lots_to_skus(_sku_list(), lots)
+                st.session_state.skus = updated
+                _bump_data_editor("master_editor")
+                st.success("; ".join(report.messages + match_report.messages))
+                preview_rows = []
+                for lot in lots[:20]:
+                    sku = _skus_by_id().get(lot.sku_id)
+                    preview_rows.append(
+                        {
+                            "품목코드": lot.sku_id,
+                            "품명": sku.name if sku else "-",
+                            "유통기한": lot.expiry_date,
+                            "수량": lot.qty,
+                        }
+                    )
+                st.dataframe(pd.DataFrame(preview_rows), hide_index=True)
+            else:
+                st.error("; ".join(report.messages))
+            for warning in report.warnings[:5]:
+                st.warning(warning)
+            if report.ok and match_report.warnings:
+                for warning in match_report.warnings[:5]:
+                    st.warning(warning)
+
+    st.markdown("---")
     st.markdown("**필수 컬럼 (재고 CSV)**")
     st.code("품목코드, 품명, 현재고", language="text")
     st.markdown("**선택 컬럼 — 없으면 기본값**")
@@ -758,6 +825,9 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
     )
     st.markdown("**ERP 한글 내보내기 필수 컬럼 (출고)**")
     st.code("품목코드, 주간시작일, 출고수량", language="text")
+    st.markdown("**WMS 유통기한 필수 컬럼**")
+    st.code("품목코드, 유통기한, 수량", language="text")
+    st.caption("같은 SKU에 유통기한이 여러 개면 행을 나눠서 입력 (LOT별 수량)")
 
 
 def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
@@ -929,7 +999,7 @@ def tab_expiry(skus: list[SkuMaster]) -> None:
 @st.fragment
 def _render_expiry(skus: list[SkuMaster]) -> None:
     st.subheader("유통기한 관리")
-    st.caption("가장 빠른 LOT 유통기한 기준 — FEFO 출고 · 카테고리별 임박/주의 알림")
+    st.caption("WMS LOT별 유통기한·수량 — FEFO 출고 · 카테고리별 임박/주의 알림")
 
     if "expiry_thresholds" not in st.session_state:
         st.session_state.expiry_thresholds = _default_expiry_thresholds()
@@ -957,21 +1027,52 @@ def _render_expiry(skus: list[SkuMaster]) -> None:
 
     thresholds = draft_thresholds if draft_thresholds else st.session_state.expiry_thresholds
 
-    alerts = build_expiry_alerts(skus, thresholds_by_category=thresholds)
-    tracked = len(alerts)
-    without_expiry = len(skus) - tracked
+    alerts = build_expiry_lot_alerts(skus, thresholds_by_category=thresholds)
+    lot_rows = sum(len(s.expiry_lots) for s in skus)
+    tracked_skus = len({alert.sku_id for alert in alerts})
+    without_expiry = len(skus) - tracked_skus
     counts = summarize_expiry_counts(alerts)
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("⛔ 기한 경과", counts["expired"])
     c2.metric("🔴 임박", counts["critical"])
     c3.metric("🟡 주의", counts["warning"])
     c4.metric("🟢 양호", counts["ok"])
-    c5.metric("미등록 SKU", without_expiry)
+    c5.metric("LOT 행", lot_rows)
+    c6.metric("미등록 SKU", without_expiry)
 
     if not alerts:
-        st.info("유통기한이 등록된 SKU가 없습니다. **⑦ 마스터 편집** 또는 ERP CSV에서 `유통기한` 컬럼을 입력하세요.")
+        st.info(
+            "유통기한이 등록된 SKU가 없습니다. **⑤ ERP 연동 → ③ WMS 유통기한** "
+            "또는 **⑦ 마스터 편집**에서 입력하세요."
+        )
         return
+
+    lot_table = []
+    for sku in skus:
+        if not sku.expiry_lots:
+            continue
+        for lot in sku.expiry_lots:
+            lot_table.append(
+                {
+                    "품목코드": sku.sku_id,
+                    "품명": sku.name,
+                    "유통기한": lot.expiry_date,
+                    "LOT 수량": round(lot.qty, 0),
+                    "현재고(전체)": round(sku.on_hand, 0),
+                }
+            )
+    if lot_table:
+        st.markdown("**유통기한별 재고 (WMS LOT)**")
+        st.dataframe(
+            pd.DataFrame(lot_table),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "LOT 수량": st.column_config.NumberColumn(format="%.0f"),
+                "현재고(전체)": st.column_config.NumberColumn(format="%.0f"),
+            },
+        )
 
     rows = []
     for alert in alerts:
@@ -983,23 +1084,21 @@ def _render_expiry(skus: list[SkuMaster]) -> None:
                 "카테고리": alert.category_label,
                 "유통기한": alert.expiry_date,
                 "잔여일": alert.days_remaining,
-                "임박 기준": int(alert.critical_threshold_days),
-                "주의 기준": int(alert.warning_threshold_days),
-                "임박재고": round(alert.expiring_qty, 0),
-                "현재고": alert.on_hand,
+                "LOT 수량": round(alert.expiring_qty, 0),
+                "현재고(전체)": alert.on_hand,
                 "권장 조치": alert.action,
                 "거래처": alert.vendor,
             }
         )
-    st.markdown("**FEFO 우선순위 (잔여일 짧은 순)**")
+    st.markdown("**FEFO 우선순위 (잔여일 짧은 순 · LOT별)**")
     st.dataframe(
         pd.DataFrame(rows),
         hide_index=True,
         use_container_width=True,
         column_config={
             "잔여일": st.column_config.NumberColumn(format="%d"),
-            "임박재고": st.column_config.NumberColumn(format="%.0f"),
-            "현재고": st.column_config.NumberColumn(format="%.0f"),
+            "LOT 수량": st.column_config.NumberColumn(format="%.0f"),
+            "현재고(전체)": st.column_config.NumberColumn(format="%.0f"),
         },
     )
 

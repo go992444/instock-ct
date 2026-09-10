@@ -5,6 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+@dataclass(frozen=True)
+class ExpiryLot:
+    sku_id: str
+    expiry_date: str
+    qty: float
+
+
 @dataclass
 class SkuMaster:
     sku_id: str
@@ -19,6 +26,7 @@ class SkuMaster:
     safety_stock_days: float = 7.0
     nearest_expiry: str | None = None
     expiring_qty: float | None = None
+    expiry_lots: list[ExpiryLot] = field(default_factory=list)
 
     @property
     def safety_stock_units(self) -> float:

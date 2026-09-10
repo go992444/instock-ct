@@ -8,11 +8,13 @@ from pathlib import Path
 import pandas as pd
 
 from instock_ct.erp_import import (
+    apply_expiry_lots_to_skus,
     is_korean_sales_frame,
     parse_native_sales_frame,
     parse_sales_csv,
     parse_sales_upload,
     parse_sku_csv,
+    parse_wms_expiry_lots,
     parse_younglimwon_aggregated_sales,
     parse_younglimwon_inventory,
     read_uploaded_csv,
@@ -131,6 +133,28 @@ class ErpImportTests(unittest.TestCase):
         upload = FakeUpload(text.encode("cp949"))
         frame = read_uploaded_csv(upload)
         self.assertEqual(list(frame.columns), ["품목코드", "주간시작일", "출고수량"])
+
+    def test_parse_wms_expiry_lots(self) -> None:
+        frame = pd.read_csv(SAMPLES / "wms_expiry.sample.csv")
+        lots, report = parse_wms_expiry_lots(frame)
+        self.assertTrue(report.ok)
+        self.assertEqual(len(lots), 3)
+        self.assertEqual(lots[0].sku_id, "MC-001")
+        self.assertAlmostEqual(lots[0].qty, 120.0)
+
+    def test_apply_expiry_lots_to_skus(self) -> None:
+        frame = pd.read_csv(SAMPLES / "wms_expiry.sample.csv")
+        lots, _ = parse_wms_expiry_lots(frame)
+        skus, report = parse_sku_csv(
+            pd.read_csv(SAMPLES / "erp_inventory_export.sample.csv"),
+            preset="erp_korean",
+        )
+        updated, match_report = apply_expiry_lots_to_skus(skus, lots)
+        self.assertTrue(match_report.ok)
+        mc001 = next(s for s in updated if s.sku_id == "MC-001")
+        self.assertEqual(len(mc001.expiry_lots), 2)
+        self.assertEqual(mc001.nearest_expiry, "2026-10-15")
+        self.assertAlmostEqual(mc001.expiring_qty, 120.0)
 
 
 if __name__ == "__main__":

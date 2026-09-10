@@ -9,13 +9,16 @@ from dataclasses import replace
 from instock_ct.config import DEFAULT_EXPIRY_THRESHOLDS_BY_CATEGORY, DEFAULT_SKUS
 from instock_ct.expiry_engine import (
     assess_expiry,
+    assess_expiry_lot,
     build_expiry_alerts,
+    build_expiry_lot_alerts,
     classify_expiry,
     days_until_expiry,
     get_expiry_thresholds,
     parse_expiry_date,
     summarize_expiry_counts,
 )
+from instock_ct.models import ExpiryLot
 from instock_ct.models import SkuMaster
 
 
@@ -135,6 +138,19 @@ class ExpiryEngineTests(unittest.TestCase):
         self.assertEqual(len(alerts), 1)
         self.assertEqual(alerts[0].risk_level, "warning")
         self.assertEqual(alerts[0].warning_threshold_days, 60.0)
+
+    def test_build_expiry_lot_alerts_per_lot_qty(self) -> None:
+        sku = replace(
+            DEFAULT_SKUS[0],
+            expiry_lots=[
+                ExpiryLot(sku_id=DEFAULT_SKUS[0].sku_id, expiry_date="2026-09-10", qty=30.0),
+                ExpiryLot(sku_id=DEFAULT_SKUS[0].sku_id, expiry_date="2026-12-01", qty=90.0),
+            ],
+        )
+        alerts = build_expiry_lot_alerts([sku], today=date(2026, 9, 3))
+        self.assertEqual(len(alerts), 2)
+        self.assertEqual(alerts[0].expiring_qty, 30.0)
+        self.assertEqual(alerts[1].expiring_qty, 90.0)
 
 
 if __name__ == "__main__":
