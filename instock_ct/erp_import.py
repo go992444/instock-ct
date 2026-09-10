@@ -109,6 +109,7 @@ WMS_EXPIRY_MAP: dict[str, str] = {
 }
 
 CATEGORY_LABEL_TO_CODE: dict[str, str] = {
+    "내시경": "endoscopy",
     "의료기기 소mo품": "medical_consumable",
     "의료기기 소모품": "medical_consumable",
     "의료소mo품": "medical_consumable",
@@ -276,6 +277,8 @@ def _resolve_category(label: str) -> tuple[str, str]:
         return text, CATEGORIES[text]
 
     compact = text.replace(" ", "")
+    if "내시경" in compact:
+        return "endoscopy", text
     if "한약" in compact:
         return "herbal", text
     upper = compact.upper()
@@ -585,6 +588,80 @@ def prepare_younglimwon_inventory(
             "현재고": work["재고수량"].values,
             "일평균출고": avg_daily.values,
         }
+    )
+
+
+def build_younglimwon_outbound_preview(
+    frame: pd.DataFrame,
+    *,
+    min_outbound: float = 0.0,
+    period_days: float = 30.0,
+    limit: int = 10,
+) -> pd.DataFrame:
+    """Top SKUs showing 출고계 ÷ period → 일평균출고 calculation."""
+    df = _normalize_columns(frame)
+    if "품목번호" not in df.columns:
+        return pd.DataFrame()
+    outbound_col = None
+    for candidate in ("출고계", "판매출고", "출고"):
+        if candidate in df.columns:
+            outbound_col = candidate
+            break
+    if outbound_col is None:
+        return pd.DataFrame()
+
+    work = df[df["품목번호"].notna()].copy()
+    work["품목번호"] = work["품목번호"].astype(str).str.strip()
+    work = work[~work["품목번호"].str.upper().eq("TOTAL")]
+    work[outbound_col] = pd.to_numeric(work[outbound_col], errors="coerce").fillna(0.0)
+    if min_outbound > 0:
+        work = work[work[outbound_col] >= min_outbound].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    period = max(1.0, float(period_days))
+    name_col = "품목명" if "품목명" in work.columns else "품명"
+    if name_col not in work.columns:
+        work[name_col] = work["품목번호"]
+
+    preview = work.nlargest(min(limit, len(work)), outbound_col).copy()
+    return pd.DataFrame(
+        {
+            "품목코드": preview["품목번호"].astype(str).values,
+            "품명": preview[name_col].fillna(preview["품목번호"]).astype(str).values,
+            "출고계": preview[outbound_col].values,
+            "기간(일)": int(period),
+            "일평균출고": (preview[outbound_col] / period).round(2).values,
+        }
+    )
+
+
+def build_outbound_preview_from_skus(
+    skus: list[SkuMaster],
+    *,
+    period_days: float = 30.0,
+    limit: int = 10,
+) -> pd.DataFrame:
+    """Reverse-engineer preview from saved 일평균출고 for verification."""
+    period = max(1.0, float(period_days))
+    ranked = sorted(
+        [s for s in skus if s.avg_daily_demand > 0],
+        key=lambda sku: sku.avg_daily_demand,
+        reverse=True,
+    )[:limit]
+    if not ranked:
+        return pd.DataFrame()
+    return pd.DataFrame(
+        [
+            {
+                "품목코드": sku.sku_id,
+                "품명": sku.name,
+                "출고계(역산)": round(sku.avg_daily_demand * period, 1),
+                "기간(일)": int(period),
+                "일평균출고": sku.avg_daily_demand,
+            }
+            for sku in ranked
+        ]
     )
 
 

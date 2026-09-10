@@ -8,7 +8,7 @@ import logging
 import streamlit as st
 
 from instock_ct.browser_storage import BROWSER_STORAGE_KEY, parse_snapshot, snapshot_to_json
-from instock_ct.models import SkuMaster, WeeklySales
+from instock_ct.models import ExpiryLot, SkuMaster, WeeklySales
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +73,12 @@ def browser_persist_available() -> bool:
     return _st_javascript is not None
 
 
-def queue_browser_save(skus: list[SkuMaster], imported_sales: list[WeeklySales] | None) -> None:
-    st.session_state._browser_save_payload = snapshot_to_json(skus, imported_sales)
+def queue_browser_save(
+    skus: list[SkuMaster],
+    imported_sales: list[WeeklySales] | None,
+    expiry_lots: list[ExpiryLot] | None = None,
+) -> None:
+    st.session_state._browser_save_payload = snapshot_to_json(skus, imported_sales, expiry_lots)
 
 
 def flush_browser_save_if_pending() -> None:
@@ -132,13 +136,15 @@ def ensure_browser_storage_restored() -> None:
         return
 
     try:
-        skus, imported_sales = parse_snapshot(str(stored))
+        skus, imported_sales, expiry_lots = parse_snapshot(str(stored))
     except (json.JSONDecodeError, ValueError, KeyError, TypeError):
         st.session_state._browser_storage_corrupt = True
         return
 
     st.session_state.skus = skus
     st.session_state.imported_sales = imported_sales
+    if expiry_lots:
+        st.session_state.expiry_lots = expiry_lots
     st.session_state._browser_storage_restored = True
 
 

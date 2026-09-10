@@ -52,7 +52,9 @@ from instock_ct.erp_import import (  # noqa: E402
     build_reorder_export_frame,
     build_sample_erp_sku_csv_bytes,
     build_minimal_erp_sku_csv_bytes,
+    build_outbound_preview_from_skus,
     build_sample_wms_expiry_csv_bytes,
+    build_younglimwon_outbound_preview,
     coerce_float,
     format_younglimwon_period_label,
     is_korean_sales_frame,
@@ -179,6 +181,57 @@ def _younglimwon_period_label() -> str:
     )
 
 
+def _apply_period_preset(days: int, *, prefix: str) -> None:
+    end = date.today()
+    start = end - timedelta(days=max(1, days) - 1)
+    if prefix == "ylw":
+        st.session_state.ylw_period_start_date = start
+        st.session_state.ylw_period_end_date = end
+    else:
+        st.session_state.forecast_ship_start_date = start
+        st.session_state.forecast_ship_end_date = end
+
+
+def _render_period_preset_buttons(*, prefix: str) -> None:
+    c1, c2, c3 = st.columns(3)
+    if c1.button("최근 30일", use_container_width=True, key=f"{prefix}_preset_30"):
+        _apply_period_preset(30, prefix=prefix)
+        st.rerun()
+    if c2.button("최근 90일", use_container_width=True, key=f"{prefix}_preset_90"):
+        _apply_period_preset(90, prefix=prefix)
+        st.rerun()
+    if c3.button("최근 365일", use_container_width=True, key=f"{prefix}_preset_365"):
+        _apply_period_preset(365, prefix=prefix)
+        st.rerun()
+
+
+def _render_outbound_calc_panel(
+    *,
+    period_days: float,
+    period_label: str,
+    raw_frame: pd.DataFrame | None = None,
+    skus: list[SkuMaster] | None = None,
+    min_outbound: float = 0.0,
+) -> None:
+    with st.expander("🔍 출고계 → 일평균출고 검증 (상위 10건)", expanded=False):
+        st.caption(
+            f"**{period_label}** · 계산식: **일평균출고 = 출고계 ÷ {int(period_days)}**"
+        )
+        preview = pd.DataFrame()
+        if raw_frame is not None and is_younglimwon_inventory_frame(raw_frame):
+            preview = build_younglimwon_outbound_preview(
+                raw_frame,
+                min_outbound=min_outbound,
+                period_days=period_days,
+            )
+        elif skus:
+            preview = build_outbound_preview_from_skus(skus, period_days=period_days)
+        if preview.empty:
+            st.info("검증할 출고계·일평균출고 데이터가 없습니다.")
+        else:
+            st.dataframe(preview, use_container_width=True, hide_index=True)
+
+
 def _render_younglimwon_date_range(
     *,
     show_min_outbound: bool = True,
@@ -187,6 +240,7 @@ def _render_younglimwon_date_range(
     """Shared 출고계 date range when export files have no date column."""
     if title:
         st.markdown(title)
+    _render_period_preset_buttons(prefix="ylw")
     default_end = date.today()
     default_start = default_end - timedelta(days=29)
 
@@ -622,6 +676,12 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
             key="master_bulk_mode",
         )
         ylw_min_out, ylw_period = _render_younglimwon_date_range()
+        _render_outbound_calc_panel(
+            period_days=ylw_period,
+            period_label=_younglimwon_period_label(),
+            skus=skus,
+            min_outbound=float(ylw_min_out),
+        )
         tpl_c1, tpl_c2 = st.columns(2)
         with tpl_c1:
             st.download_button(
@@ -688,11 +748,21 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
                 saved = _save_session()
                 parts.append(persist_result_message(saved).strip())
                 st.session_state.master_save_flash = " · ".join(parts)
+                st.session_state.last_outbound_preview = build_younglimwon_outbound_preview(
+                    raw,
+                    min_outbound=float(ylw_min_out),
+                    period_days=float(ylw_period),
+                )
                 for warning in report.warnings[:5]:
                     st.warning(warning)
                 st.rerun()
             else:
                 st.error("; ".join(report.messages))
+
+    last_preview = st.session_state.get("last_outbound_preview")
+    if isinstance(last_preview, pd.DataFrame) and not last_preview.empty:
+        with st.expander("📋 직전 가져오기 — 출고계 계산 결과", expanded=False):
+            st.dataframe(last_preview, use_container_width=True, hide_index=True)
 
     st.markdown(f"**현재 품목 {len(skus)}건**")
     if len(skus) > 300:
@@ -1244,6 +1314,12 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
         st.caption("필수: 품목코드 · 품명 · 현재고 · (권장) 일평균출고")
         st.caption("영림원 **2.xlsx**처럼 날짜가 없는 파일은 **집계 시작일~종료일** 을 export 구간에 맞게 지정하세요.")
         ylw_min_out, ylw_period = _render_younglimwon_date_range()
+        _render_outbound_calc_panel(
+            period_days=ylw_period,
+            period_label=_younglimwon_period_label(),
+            skus=_sku_list(),
+            min_outbound=float(ylw_min_out),
+        )
         inv_file = st.file_uploader(
             "재고 CSV / Excel (.xlsx)",
             type=["csv", "xlsx", "xls"],

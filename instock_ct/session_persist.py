@@ -20,7 +20,7 @@ from instock_ct.browser_persist import (
 )
 from instock_ct.browser_storage import parse_snapshot, snapshot_to_json
 from instock_ct.config import DEFAULT_SKUS
-from instock_ct.models import SkuMaster, WeeklySales
+from instock_ct.models import ExpiryLot, SkuMaster, WeeklySales
 
 CLIENT_QUERY_PARAM = "cid"
 _DEFAULT_PERSIST_CANDIDATES = (
@@ -86,7 +86,7 @@ def _save_sqlite(key: str, payload: str) -> bool:
         return False
 
 
-def _load_sqlite(key: str) -> tuple[list[SkuMaster], list[WeeklySales] | None] | None:
+def _load_sqlite(key: str) -> tuple[list[SkuMaster], list[WeeklySales] | None, list[ExpiryLot] | None] | None:
     try:
         conn = _sqlite_connect()
         row = conn.execute("SELECT payload FROM snapshots WHERE key = ?", (key,)).fetchone()
@@ -121,6 +121,21 @@ def mark_persist_dirty() -> None:
     st.session_state._persist_dirty = True
 
 
+def _session_expiry_lots() -> list[ExpiryLot] | None:
+    lots = st.session_state.get("expiry_lots")
+    if lots:
+        return lots
+    flattened: list[ExpiryLot] = []
+    for sku in st.session_state.get("skus", []):
+        flattened.extend(sku.expiry_lots)
+    return flattened or None
+
+
+def _apply_restored_expiry_lots(expiry_lots: list[ExpiryLot] | None) -> None:
+    if expiry_lots:
+        st.session_state.expiry_lots = expiry_lots
+
+
 def _persist_path(client_id: str) -> Path:
     safe_id = "".join(ch for ch in client_id if ch.isalnum() or ch in "-_")
     return _resolve_persist_dir() / f"{safe_id}.json"
@@ -136,7 +151,7 @@ def _write_snapshot_file(path: Path, payload: str) -> bool:
         return False
 
 
-def _read_snapshot_file(path: Path) -> tuple[list[SkuMaster], list[WeeklySales] | None] | None:
+def _read_snapshot_file(path: Path) -> tuple[list[SkuMaster], list[WeeklySales] | None, list[ExpiryLot] | None] | None:
     if not path.is_file():
         return None
     try:
@@ -149,8 +164,9 @@ def save_server_snapshot(
     client_id: str,
     skus: list[SkuMaster],
     imported_sales: list[WeeklySales] | None,
+    expiry_lots: list[ExpiryLot] | None = None,
 ) -> bool:
-    payload = snapshot_to_json(skus, imported_sales)
+    payload = snapshot_to_json(skus, imported_sales, expiry_lots)
     cid_ok = _write_snapshot_file(_persist_path(client_id), payload)
     global_ok = _write_snapshot_file(GLOBAL_SNAPSHOT_PATH, payload)
     sqlite_cid_ok = _save_sqlite(f"cid:{client_id}", payload)
@@ -160,22 +176,22 @@ def save_server_snapshot(
 
 def load_server_snapshot(
     client_id: str,
-) -> tuple[list[SkuMaster], list[WeeklySales] | None, str] | None:
+) -> tuple[list[SkuMaster], list[WeeklySales] | None, list[ExpiryLot] | None, str] | None:
     for key, source in (
         (f"cid:{client_id}", "sqlite"),
         ("global", "sqlite"),
     ):
         data = _load_sqlite(key)
         if data is not None:
-            return data[0], data[1], source
+            return data[0], data[1], data[2], source
 
     data = _read_snapshot_file(_persist_path(client_id))
     if data is not None:
-        return data[0], data[1], "server"
+        return data[0], data[1], data[2], "server"
 
     data = _read_snapshot_file(GLOBAL_SNAPSHOT_PATH)
     if data is not None:
-        return data[0], data[1], "global"
+        return data[0], data[1], data[2], "global"
 
     return None
 
@@ -223,9 +239,10 @@ def ensure_session_restored() -> None:
 
     server_data = load_server_snapshot(client_id)
     if server_data is not None:
-        skus, imported_sales, source = server_data
+        skus, imported_sales, expiry_lots, source = server_data
         st.session_state.skus = skus
         st.session_state.imported_sales = imported_sales
+        _apply_restored_expiry_lots(expiry_lots)
         st.session_state._session_persist_ready = True
         st.session_state._browser_storage_ready = True
         st.session_state._session_persist_restored = True
@@ -244,6 +261,7 @@ def ensure_session_restored() -> None:
             client_id,
             skus,
             st.session_state.get("imported_sales"),
+            _session_expiry_lots(),
         )
 
     st.session_state._session_persist_ready = True
@@ -267,12 +285,13 @@ def persist_session_data(*, force: bool = False) -> bool:
     client_id = st.session_state.get("client_id") or resolve_client_id()
     st.session_state.client_id = client_id
 
-    server_saved = save_server_snapshot(client_id, skus, imported_sales)
+    expiry_lots = _session_expiry_lots()
+    server_saved = save_server_snapshot(client_id, skus, imported_sales, expiry_lots)
     st.session_state._server_snapshot_exists = server_saved
 
     browser_saved = False
     if browser_persist_available():
-        queue_browser_save(skus, imported_sales)
+        queue_browser_save(skus, imported_sales, expiry_lots)
         browser_saved = persist_browser_storage()
 
     saved = server_saved or browser_saved
@@ -288,6 +307,7 @@ def clear_session_data() -> None:
     if client_id:
         delete_server_snapshot(client_id)
     clear_browser_storage()
+    st.session_state.expiry_lots = None
     st.session_state._persist_dirty = False
     st.session_state._last_persist_count = 0
     st.session_state._server_snapshot_exists = False

@@ -6,6 +6,7 @@ from instock_ct.models import SkuMaster
 
 CATEGORIES: dict[str, str] = {
     "medical_consumable": "의료기기 소모품",
+    "endoscopy": "내시경",
     "pb": "PB",
     "herbal": "한약재",
     "general": "일반 소모품",
@@ -31,6 +32,7 @@ LOW_TURNOVER_THRESHOLD = 4.0
 # 연간 회전(회/년) 미만이면 저회전 — 카테고리별 기준
 DEFAULT_TURNOVER_THRESHOLDS_BY_CATEGORY: dict[str, float] = {
     "medical_consumable": 6.0,
+    "endoscopy": 8.0,
     "pb": 4.0,
     "herbal": 3.0,
     "general": 4.0,
@@ -40,6 +42,7 @@ DEFAULT_TURNOVER_THRESHOLDS_BY_CATEGORY: dict[str, float] = {
 # (임박 일수, 주의 일수) — 카테고리별 유통기한 알림 기준
 DEFAULT_EXPIRY_THRESHOLDS_BY_CATEGORY: dict[str, tuple[float, float]] = {
     "medical_consumable": (30.0, 90.0),
+    "endoscopy": (60.0, 120.0),
     "pb": (45.0, 120.0),
     "herbal": (60.0, 180.0),
     "general": (30.0, 90.0),

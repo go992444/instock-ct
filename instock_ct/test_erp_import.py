@@ -10,6 +10,8 @@ import pandas as pd
 from instock_ct.erp_import import (
     _flatten_excel_columns,
     _rename_duplicate_gubun_columns,
+    _resolve_category,
+    build_younglimwon_outbound_preview,
     apply_expiry_lots_to_skus,
     format_younglimwon_period_label,
     is_korean_sales_frame,
@@ -342,6 +344,22 @@ class ErpImportTests(unittest.TestCase):
         self.assertEqual(appended[0].on_hand, 10)
         self.assertEqual(stats["skipped"], 1)
         self.assertEqual(stats["added"], 1)
+
+    def test_endoscopy_category_mapping(self) -> None:
+        code, label = _resolve_category("내시경")
+        self.assertEqual(code, "endoscopy")
+        self.assertEqual(label, "내시경")
+
+    def test_outbound_preview_calculation(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {"품목번호": "ENP00001", "품명": "테스트", "출고계": 300, "재고수량": 10},
+                {"품목번호": "ENP00002", "품명": "테스트2", "출고계": 30, "재고수량": 5},
+            ]
+        )
+        preview = build_younglimwon_outbound_preview(frame, period_days=30, limit=5)
+        self.assertEqual(len(preview), 2)
+        self.assertEqual(float(preview.iloc[0]["일평균출고"]), 10.0)
 
 
 if __name__ == "__main__":

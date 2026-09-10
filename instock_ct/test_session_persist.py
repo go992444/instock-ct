@@ -54,7 +54,7 @@ class SessionPersistTests(unittest.TestCase):
         restored = load_server_snapshot(client_id)
         self.assertIsNotNone(restored)
         assert restored is not None
-        restored_skus, _, source = restored
+        restored_skus, _, _, source = restored
         self.assertEqual(restored_skus[0].sku_id, "ENP00001")
         self.assertEqual(restored_skus[0].on_hand, -3.0)
         self.assertIn(source, {"sqlite", "server", "global"})
@@ -101,7 +101,7 @@ class SessionPersistTests(unittest.TestCase):
         restored = load_server_snapshot(other_id)
         self.assertIsNotNone(restored)
         assert restored is not None
-        restored_skus, _, _ = restored
+        restored_skus, _, _, _ = restored
         self.assertEqual(restored_skus[0].sku_id, "ENP00099")
 
 
