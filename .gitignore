@@ -10,3 +10,4 @@ venv/
 _test_*.csv
 _xlsx_title.txt
 run-instock.log
+instock_ct/.persist/

@@ -201,27 +201,48 @@ def forecast_from_weekly_sales(
         if not history:
             continue
         recent = history[-window:]
-        avg_weekly = sum(recent) / len(recent)
-        if len(recent) >= 2:
+        n = len(recent)
+        avg_weekly = sum(recent) / n
+        avg_monthly = avg_weekly * (30.0 / 7.0)
+
+        forecast_next: float | None
+        basis: str
+        if n >= 2:
+            deltas = [recent[i] - recent[i - 1] for i in range(1, n)]
+            avg_delta = sum(deltas) / len(deltas)
+            forecast_next = max(0.0, recent[-1] + avg_delta)
             trend_delta = recent[-1] - recent[0]
-            trend = "상승" if trend_delta > 0 else "하락" if trend_delta < 0 else "보합"
+            if avg_delta > 0.5:
+                trend = "상승"
+            elif avg_delta < -0.5:
+                trend = "하락"
+            elif trend_delta > 0:
+                trend = "상승"
+            elif trend_delta < 0:
+                trend = "하락"
+            else:
+                trend = "보합"
+            basis = f"최근 {n}주 추세 반영"
         else:
+            forecast_next = None
             trend = "보합"
-        forecast_next = avg_weekly
-        if len(recent) >= 2:
-            forecast_next = recent[-1] * 0.4 + avg_weekly * 0.6
+            basis = "기간 1건·추이 불가"
+
+        run_rate_weekly = forecast_next if forecast_next is not None else avg_weekly
         results.append(
             ForecastResult(
                 sku_id=sku_id,
                 name=names.get(sku_id, sku_id),
                 history_weeks=len(history),
                 avg_weekly=avg_weekly,
+                avg_monthly=avg_monthly,
                 forecast_next_week=forecast_next,
-                suggested_daily_demand=forecast_next / 7.0,
+                suggested_daily_demand=run_rate_weekly / 7.0,
                 trend=trend,
+                forecast_basis=basis,
             )
         )
-    results.sort(key=lambda item: item.forecast_next_week, reverse=True)
+    results.sort(key=lambda item: item.avg_weekly, reverse=True)
     return results
 
 

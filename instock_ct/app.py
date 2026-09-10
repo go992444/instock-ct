@@ -23,7 +23,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from instock_ct.config import (  # noqa: E402
     CATEGORIES,
-    CATEGORY_SHARE,
     DEFAULT_SKUS,
     DEFAULT_TARGET_COVERAGE_DAYS,
     EXPIRY_CRITICAL_DAYS,
@@ -45,6 +44,7 @@ from instock_ct.inventory_engine import (  # noqa: E402
 )
 from instock_ct.models import SkuMaster, WeeklySales  # noqa: E402
 from instock_ct.erp_import import (  # noqa: E402
+    MERGE_MODE_LABELS,
     PRESET_LABELS,
     apply_expiry_lots_to_skus,
     build_reorder_export_frame,
@@ -53,6 +53,8 @@ from instock_ct.erp_import import (  # noqa: E402
     build_sample_wms_expiry_csv_bytes,
     coerce_float,
     is_korean_sales_frame,
+    merge_sku_masters,
+    parse_inventory_upload,
     parse_native_sales_frame,
     parse_sales_csv,
     parse_sales_upload,
@@ -60,10 +62,25 @@ from instock_ct.erp_import import (  # noqa: E402
     parse_wms_expiry_lots,
     parse_younglimwon_inventory,
     read_uploaded_table,
+    sales_from_sku_masters,
+    sync_sales_from_inventory,
     is_younglimwon_inventory_frame,
     skus_to_erp_export_frame,
 )
+from instock_ct.erp_import import _resolve_category  # noqa: E402
 from instock_ct.sample_sales import build_sample_weekly_sales, weekly_sales_to_dataframe_rows  # noqa: E402
+from instock_ct.session_persist import (  # noqa: E402
+    clear_session_data,
+    ensure_session_restored,
+    is_demo_skus,
+    mark_persist_dirty,
+    persist_result_message,
+    persist_session_data,
+    persist_status_label,
+    render_persist_flash,
+    session_persist_available,
+    set_persist_flash,
+)
 from instock_ct.expiry_engine import (  # noqa: E402
     build_expiry_lot_alerts,
     expiry_label,
@@ -128,6 +145,21 @@ def _data_editor_key(name: str) -> str:
     return f"{name}_v{st.session_state.get(f'{name}_rev', 0)}"
 
 
+def _file_uploader_key(name: str) -> str:
+    return f"{name}_v{st.session_state.get(f'{name}_rev', 0)}"
+
+
+def _reset_file_uploader(name: str) -> None:
+    st.session_state[f"{name}_rev"] = st.session_state.get(f"{name}_rev", 0) + 1
+
+
+def _save_session() -> bool:
+    mark_persist_dirty()
+    saved = persist_session_data()
+    set_persist_flash(saved)
+    return saved
+
+
 def _sku_list() -> list[SkuMaster]:
     return st.session_state.skus
 
@@ -140,6 +172,20 @@ def _fmt_num(value: float, digits: int = 1) -> str:
     if value >= 999:
         return "999+"
     return f"{value:.{digits}f}"
+
+
+def _category_shares(skus: list[SkuMaster]) -> list[tuple[str, float, int]]:
+    """Return (label, share, count) sorted by count descending."""
+    if not skus:
+        return []
+    counts: dict[str, int] = {}
+    for sku in skus:
+        label = (sku.category_label or CATEGORIES.get(sku.category, sku.category)).strip()
+        counts[label] = counts.get(label, 0) + 1
+    total = len(skus)
+    rows = [(label, count / total, count) for label, count in counts.items()]
+    rows.sort(key=lambda row: (-row[2], row[0]))
+    return rows
 
 
 def _render_sidebar() -> tuple[float, str | None]:
@@ -160,13 +206,40 @@ def _render_sidebar() -> tuple[float, str | None]:
         format_func=lambda key: CATEGORIES[key],
     )
     if st.sidebar.button("샘플 SKU 초기화", use_container_width=True):
+        clear_session_data()
         st.session_state.skus = [copy.deepcopy(s) for s in DEFAULT_SKUS]
+        st.session_state.imported_sales = None
         _bump_data_editor("master_editor")
         st.rerun()
+    if session_persist_available():
+        st.sidebar.caption(persist_status_label())
+        if st.sidebar.button("💾 지금 저장", use_container_width=True):
+            if is_demo_skus(_sku_list()):
+                st.sidebar.warning("데모 데이터는 저장하지 않습니다.")
+            else:
+                saved = _save_session()
+                if saved:
+                    st.sidebar.success("저장 완료")
+                else:
+                    st.sidebar.error("저장 실패")
+                st.rerun()
+        st.sidebar.caption("같은 브라우저·같은 주소(URL)로 다시 열면 데이터가 복원됩니다.")
+        if st.sidebar.button("저장 데이터 삭제", use_container_width=True):
+            clear_session_data()
+            st.session_state.skus = [copy.deepcopy(s) for s in DEFAULT_SKUS]
+            st.session_state.imported_sales = None
+            st.session_state._session_persist_ready = True
+            st.session_state._browser_storage_ready = True
+            _bump_data_editor("master_editor")
+            st.rerun()
     st.sidebar.markdown("---")
-    st.sidebar.markdown("**카테고리 비중 (공고 참고)**")
-    for code, share in CATEGORY_SHARE.items():
-        st.sidebar.progress(share, text=f"{CATEGORIES[code]} {share:.0%}")
+    st.sidebar.markdown(f"**카테고리 비중 (현재 {len(_sku_list())}건)**")
+    shares = _category_shares(_sku_list())
+    if shares:
+        for label, share, count in shares:
+            st.sidebar.progress(share, text=f"{label} {share:.0%} · {count}건")
+    else:
+        st.sidebar.caption("표시할 품목이 없습니다.")
     return float(target_days), category_filter or None
 
 
@@ -175,9 +248,6 @@ def _filter_skus(skus: list[SkuMaster], categories: list[str] | None) -> list[Sk
         return skus
     allowed = set(categories)
     return [s for s in skus if s.category in allowed]
-
-
-_CATEGORY_LABEL_TO_CODE = {label: code for code, label in CATEGORIES.items()}
 
 
 def _skus_to_edit_frame(skus: list[SkuMaster]) -> pd.DataFrame:
@@ -237,9 +307,11 @@ def _parse_edit_frame(frame: pd.DataFrame) -> tuple[list[SkuMaster] | None, list
             continue
         seen_ids.add(sku_id)
 
-        if not category_label or category_label not in _CATEGORY_LABEL_TO_CODE:
-            errors.append(f"{row_no}행 ({sku_id}): 카테고리를 목록에서 선택하세요.")
+        if not category_label:
+            errors.append(f"{row_no}행 ({sku_id}): 카테고리를 입력하세요.")
             continue
+
+        cat_code, cat_label = _resolve_category(category_label)
 
         try:
             on_hand = _to_float(row.get("현재고", 0))
@@ -251,8 +323,20 @@ def _parse_edit_frame(frame: pd.DataFrame) -> tuple[list[SkuMaster] | None, list
             errors.append(f"{row_no}행 ({sku_id}): 숫자 형식이 올바르지 않습니다.")
             continue
 
-        if on_hand < 0 or avg_daily < 0 or lead_time < 1 or moq < 1 or safety_days < 0:
-            errors.append(f"{row_no}행 ({sku_id}): 음수 또는 최소값 미만입니다.")
+        if lead_time < 1:
+            lead_time = 1
+        if moq < 1:
+            moq = 1
+
+        invalid_fields: list[str] = []
+        if avg_daily < 0:
+            invalid_fields.append("일평균출고")
+        if safety_days < 0:
+            invalid_fields.append("안전재고(일)")
+        if invalid_fields:
+            errors.append(
+                f"{row_no}행 ({sku_id}): {', '.join(invalid_fields)} — 0 이상이어야 합니다."
+            )
             continue
 
         raw_expiry = str(row.get("유통기한", "")).strip()
@@ -276,8 +360,8 @@ def _parse_edit_frame(frame: pd.DataFrame) -> tuple[list[SkuMaster] | None, list
             SkuMaster(
                 sku_id=sku_id,
                 name=name,
-                category=_CATEGORY_LABEL_TO_CODE[category_label],
-                category_label=category_label,
+                category=cat_code,
+                category_label=cat_label,
                 on_hand=on_hand,
                 avg_daily_demand=avg_daily,
                 lead_time_days=lead_time,
@@ -306,28 +390,140 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
     st.caption("표에서 값을 수정한 뒤 **변경사항 저장** — 다른 탭에 즉시 반영됩니다. 행 추가·삭제도 가능합니다.")
 
     flash = st.session_state.pop("master_save_flash", None)
+    render_persist_flash()
     if flash:
         st.success(flash)
 
-    category_options = list(CATEGORIES.values())
-    edited = st.data_editor(
-        _skus_to_edit_frame(skus),
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        column_config={
+    with st.expander("📥 대량 가져오기 (CSV / Excel)", expanded=len(skus) < 30):
+        st.caption(
+            "ERP·영림원·최소 4컬럼 형식을 지원합니다. "
+            "카테고리는 **품목분류2** 값이 우선 반영됩니다. "
+            "파일 선택 후 **가져오기 실행**을 누르세요. "
+            "가져온 **일평균출고**는 ④ 수요 예측·② 발주에 자동 연동됩니다."
+        )
+        bulk_preset = st.radio(
+            "파일 형식",
+            options=list(PRESET_LABELS.keys()),
+            format_func=lambda k: PRESET_LABELS[k],
+            horizontal=True,
+            key="master_bulk_preset",
+        )
+        bulk_mode = st.selectbox(
+            "가져오기 방식",
+            options=list(MERGE_MODE_LABELS.keys()),
+            format_func=lambda k: MERGE_MODE_LABELS[k],
+            key="master_bulk_mode",
+        )
+        ylw_c1, ylw_c2 = st.columns(2)
+        with ylw_c1:
+            master_ylw_min = st.number_input(
+                "영림원: 출고계 최소 (이상만)",
+                min_value=0.0,
+                value=10.0,
+                step=1.0,
+                key="master_ylw_min_outbound",
+            )
+        with ylw_c2:
+            master_ylw_period = st.number_input(
+                "영림원: 출고계 기간(일) → 일평균출고",
+                min_value=1,
+                max_value=365,
+                value=30,
+                step=1,
+                key="master_ylw_period_days",
+            )
+        tpl_c1, tpl_c2 = st.columns(2)
+        with tpl_c1:
+            st.download_button(
+                "최소 템플릿 (4컬럼)",
+                build_minimal_erp_sku_csv_bytes(),
+                file_name="erp_inventory_minimal.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="master_bulk_tpl_min",
+            )
+        with tpl_c2:
+            st.download_button(
+                "전체 샘플 CSV",
+                build_sample_erp_sku_csv_bytes(),
+                file_name="erp_inventory_export.sample.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="master_bulk_tpl_sample",
+            )
+        bulk_file = st.file_uploader(
+            "재고 CSV / Excel (.xlsx)",
+            type=["csv", "xlsx", "xls"],
+            key=_file_uploader_key("master_bulk_inv"),
+        )
+        run_bulk_import = st.button(
+            "가져오기 실행",
+            type="primary",
+            use_container_width=True,
+            key="master_bulk_run",
+            disabled=bulk_file is None,
+        )
+        if run_bulk_import and bulk_file is not None:
+            raw = read_uploaded_table(bulk_file)
+            imported, report = parse_inventory_upload(
+                bulk_file,
+                preset=bulk_preset,
+                min_outbound=float(master_ylw_min),
+                period_days=float(master_ylw_period),
+            )
+            if report.ok:
+                merged, stats = merge_sku_masters(skus, imported, mode=bulk_mode)
+                st.session_state.skus = merged
+                st.session_state.imported_sales = sync_sales_from_inventory(
+                    raw,
+                    merged,
+                    preset=bulk_preset,
+                    min_outbound=float(master_ylw_min),
+                    period_days=float(master_ylw_period),
+                ) or None
+                _bump_data_editor("master_editor")
+                _reset_file_uploader("master_bulk_inv")
+                parts = [f"파일 {len(imported)}건 처리"]
+                if stats["added"]:
+                    parts.append(f"신규 {stats['added']}건")
+                if stats["updated"]:
+                    parts.append(f"갱신 {stats['updated']}건")
+                if stats["skipped"]:
+                    parts.append(f"건너뜀 {stats['skipped']}건")
+                parts.append(f"총 {stats['total']}건")
+                if st.session_state.imported_sales:
+                    parts.append(f"④ 수요예측 {len(st.session_state.imported_sales)}건 연동")
+                saved = _save_session()
+                parts.append(persist_result_message(saved).strip())
+                st.session_state.master_save_flash = " · ".join(parts)
+                for warning in report.warnings[:5]:
+                    st.warning(warning)
+                st.rerun()
+            else:
+                st.error("; ".join(report.messages))
+
+    st.markdown(f"**현재 품목 {len(skus)}건**")
+    if len(skus) > 300:
+        st.info("품목이 많으면 표 스크롤·저장에 시간이 걸릴 수 있습니다. 대량 수정은 CSV 가져오기를 권장합니다.")
+
+    editor_height = 520 if len(skus) > 80 else None
+    editor_kwargs: dict = {
+        "num_rows": "dynamic",
+        "use_container_width": True,
+        "hide_index": True,
+        "column_config": {
             "품목코드": st.column_config.TextColumn("품목코드", required=True, width="small"),
             "품명": st.column_config.TextColumn("품명", required=True, width="medium"),
-            "카테고리": st.column_config.SelectboxColumn(
+            "카테고리": st.column_config.TextColumn(
                 "카테고리",
-                options=category_options,
+                help="ERP 품목분류2 값 (가져오기 시 자동 입력)",
                 required=True,
                 width="medium",
             ),
-            "현재고": st.column_config.NumberColumn("현재고", min_value=0, step=1, format="%.0f"),
+            "현재고": st.column_config.NumberColumn("현재고", step=1, format="%.0f"),
             "일평균출고": st.column_config.NumberColumn("일평균출고", min_value=0, step=0.1, format="%.1f"),
-            "리드타임일": st.column_config.NumberColumn("리드타임(일)", min_value=1, step=1),
-            "MOQ": st.column_config.NumberColumn("MOQ", min_value=1, step=1),
+            "리드타임일": st.column_config.NumberColumn("리드타임(일)", min_value=0, step=1),
+            "MOQ": st.column_config.NumberColumn("MOQ", min_value=0, step=1),
             "거래처명": st.column_config.TextColumn("거래처명", width="small"),
             "안전재고일": st.column_config.NumberColumn("안전재고(일)", min_value=0, step=1),
             "유통기한": st.column_config.TextColumn(
@@ -343,8 +539,11 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
                 format="%.0f",
             ),
         },
-        key=_data_editor_key("master_editor"),
-    )
+        "key": _data_editor_key("master_editor"),
+    }
+    if editor_height is not None:
+        editor_kwargs["height"] = editor_height
+    edited = st.data_editor(_skus_to_edit_frame(skus), **editor_kwargs)
 
     c1, c2, c3 = st.columns([1, 1, 2])
     with c1:
@@ -359,7 +558,7 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
             key="master_csv_download",
         )
     with c3:
-        st.info("Tip: ERP 연동 탭 CSV 업로드와 동일한 컬럼 형식입니다.")
+        st.info("Tip: 위 **대량 가져오기**로 ERP·영림원 파일을 바로 넣을 수 있습니다.")
 
     if save:
         parsed, errors = _parse_edit_frame(edited)
@@ -370,9 +569,21 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
                 st.error(f"외 {len(errors) - 8}건 오류")
         else:
             st.session_state.skus = parsed
-            st.session_state.master_save_flash = f"SKU {len(parsed)}건 저장되었습니다."
+            _refresh_sales_from_skus(parsed)
+            sales_count = len(st.session_state.imported_sales or [])
+            flash = f"SKU {len(parsed)}건 저장되었습니다."
+            if sales_count:
+                flash += f" ④ 수요예측 {sales_count}건 연동."
+            saved = _save_session()
+            flash += persist_result_message(saved)
+            st.session_state.master_save_flash = flash
             _bump_data_editor("master_editor")
             st.rerun()
+
+
+def _refresh_sales_from_skus(skus: list[SkuMaster]) -> None:
+    sales = sales_from_sku_masters(skus)
+    st.session_state.imported_sales = sales if sales else None
 
 
 def _default_turnover_thresholds() -> dict[str, float]:
@@ -698,22 +909,40 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
         inv_file = st.file_uploader(
             "재고 CSV / Excel (.xlsx)",
             type=["csv", "xlsx", "xls"],
-            key="erp_inv",
+            key=_file_uploader_key("erp_inv"),
         )
-        if inv_file is not None:
+        run_inv_import = st.button(
+            "재고 가져오기 실행",
+            type="primary",
+            use_container_width=True,
+            key="erp_inv_run",
+            disabled=inv_file is None,
+        )
+        if run_inv_import and inv_file is not None:
             raw = read_uploaded_table(inv_file)
-            if preset == "younglimwon" or is_younglimwon_inventory_frame(raw):
-                skus, report = parse_younglimwon_inventory(
-                    raw,
-                    min_outbound=float(ylw_min_out),
-                    period_days=float(ylw_period),
-                )
-            else:
-                skus, report = parse_sku_csv(raw, preset=preset)
+            skus, report = parse_inventory_upload(
+                inv_file,
+                preset=preset,
+                min_outbound=float(ylw_min_out),
+                period_days=float(ylw_period),
+            )
             if report.ok:
                 st.session_state.skus = _reapply_stored_expiry_lots(skus)
+                st.session_state.imported_sales = sync_sales_from_inventory(
+                    raw,
+                    skus,
+                    preset=preset,
+                    min_outbound=float(ylw_min_out),
+                    period_days=float(ylw_period),
+                ) or None
                 _bump_data_editor("master_editor")
-                st.success("; ".join(report.messages))
+                _reset_file_uploader("erp_inv")
+                saved = _save_session()
+                st.success("; ".join(report.messages) + persist_result_message(saved))
+                if st.session_state.imported_sales:
+                    st.info(
+                        f"④ 수요 예측 탭에 출고 데이터 {len(st.session_state.imported_sales)}건 연동됨"
+                    )
                 for w in report.warnings[:5]:
                     st.warning(w)
                 st.dataframe(skus_to_erp_export_frame(skus).head(10), hide_index=True)
@@ -737,9 +966,16 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
         ship_file = st.file_uploader(
             "출고 CSV / Excel",
             type=["csv", "xlsx", "xls"],
-            key="erp_ship",
+            key=_file_uploader_key("erp_ship"),
         )
-        if ship_file is not None:
+        run_ship_import = st.button(
+            "출고 가져오기 실행",
+            type="primary",
+            use_container_width=True,
+            key="erp_ship_run",
+            disabled=ship_file is None,
+        )
+        if run_ship_import and ship_file is not None:
             try:
                 raw = read_uploaded_table(ship_file)
                 sales, report = parse_sales_upload(
@@ -753,7 +989,9 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
             else:
                 if report.ok:
                     st.session_state.imported_sales = sales
-                    st.success("; ".join(report.messages))
+                    _reset_file_uploader("erp_ship")
+                    saved = _save_session()
+                    st.success("; ".join(report.messages) + persist_result_message(saved))
                     st.info("④ 수요 예측 탭에서 이 데이터를 사용합니다.")
                 else:
                     st.error("; ".join(report.messages))
@@ -779,9 +1017,16 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
     wms_file = st.file_uploader(
         "WMS 유통기한 CSV / Excel",
         type=["csv", "xlsx", "xls"],
-        key="erp_wms_expiry",
+        key=_file_uploader_key("erp_wms_expiry"),
     )
-    if wms_file is not None:
+    run_wms_import = st.button(
+        "WMS 유통기한 가져오기 실행",
+        type="primary",
+        use_container_width=True,
+        key="erp_wms_run",
+        disabled=wms_file is None,
+    )
+    if run_wms_import and wms_file is not None:
         try:
             raw = read_uploaded_table(wms_file)
             lots, report = parse_wms_expiry_lots(raw)
@@ -793,7 +1038,12 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
                 updated, match_report = apply_expiry_lots_to_skus(_sku_list(), lots)
                 st.session_state.skus = updated
                 _bump_data_editor("master_editor")
-                st.success("; ".join(report.messages + match_report.messages))
+                _reset_file_uploader("erp_wms_expiry")
+                saved = _save_session()
+                st.success(
+                    "; ".join(report.messages + match_report.messages)
+                    + persist_result_message(saved)
+                )
                 preview_rows = []
                 for lot in lots[:20]:
                     sku = _skus_by_id().get(lot.sku_id)
@@ -832,11 +1082,22 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
 
 def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
     st.subheader("수요 추이 · 간단 예측")
-    st.caption("최근 N주 이동평균 기반 — 실무용 간이 예측 (딥러닝 아님)")
+    st.caption(
+        "주간 이력 2주 이상이면 **다음주 예측 = 최근주 + 주간 변화량 평균** · "
+        "마스터/영림원 기간 1건이면 **주·월 평균**만 표시(추이 없음)"
+    )
 
     sample_df = pd.DataFrame(weekly_sales_to_dataframe_rows(build_sample_weekly_sales()))
+    master_sales = sales_from_sku_masters(skus)
     if st.session_state.get("imported_sales"):
-        st.success(f"ERP 연동 출고 이력 {len(st.session_state.imported_sales)}건 사용 가능")
+        st.success(
+            f"출고·수요 데이터 {len(st.session_state.imported_sales)}건 사용 "
+            "(⑦ 마스터 편집·ERP 연동과 연동됨)"
+        )
+    elif master_sales:
+        st.success(
+            f"⑦ 마스터 편집 일평균출고 {len(master_sales)}건을 주간 수요로 환산해 사용합니다."
+        )
 
     st.download_button(
         "샘플 주간 출고 CSV (기본 형식)",
@@ -845,14 +1106,18 @@ def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
         mime="text/csv",
     )
 
-    uploaded = st.file_uploader("주간 출고 CSV", type=["csv"], key="forecast_upload")
-    preset = st.radio(
-        "CSV 형식",
-        options=list(PRESET_LABELS.keys()),
-        format_func=lambda k: PRESET_LABELS[k],
-        horizontal=True,
-        key="forecast_preset",
-    )
+    uploaded = None
+    preset = st.session_state.get("forecast_preset", "erp_korean")
+    with st.expander("주간 출고 CSV 추가 업로드 (선택)", expanded=False):
+        st.caption("별도 주간 이력 CSV가 있을 때만 사용하세요. 없으면 마스터·ERP 데이터를 자동 사용합니다.")
+        uploaded = st.file_uploader("주간 출고 CSV", type=["csv"], key="forecast_upload")
+        preset = st.radio(
+            "CSV 형식",
+            options=list(PRESET_LABELS.keys()),
+            format_func=lambda k: PRESET_LABELS[k],
+            horizontal=True,
+            key="forecast_preset",
+        )
 
     sales: list[WeeklySales] | None = None
     frame: pd.DataFrame
@@ -880,6 +1145,11 @@ def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
         )
     elif st.session_state.get("imported_sales"):
         sales = st.session_state.imported_sales
+        frame = pd.DataFrame(
+            [{"sku_id": s.sku_id, "week_start": s.week_start, "qty": s.qty} for s in sales]
+        )
+    elif master_sales:
+        sales = master_sales
         frame = pd.DataFrame(
             [{"sku_id": s.sku_id, "week_start": s.week_start, "qty": s.qty} for s in sales]
         )
@@ -925,9 +1195,13 @@ def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
                 "품명": item.name,
                 "집계 주수": item.history_weeks,
                 "주간 평균": round(item.avg_weekly, 1),
-                "다음주 예측": round(item.forecast_next_week, 1),
+                "월 평균": round(item.avg_monthly, 1),
+                "다음주 예측": round(item.forecast_next_week, 1)
+                if item.forecast_next_week is not None
+                else "—",
                 "환산 일출고": round(item.suggested_daily_demand, 2),
                 "추세": item.trend,
+                "예측 근거": item.forecast_basis,
                 "예측 기반 발주량": suggested_order,
             }
         )
@@ -1139,7 +1413,16 @@ def _render_active_tab(active_tab: str, skus: list[SkuMaster], target_days: floa
 
 
 def main() -> None:
+    ensure_session_restored()
     _init_state()
+    if st.session_state.pop("_browser_storage_corrupt", False):
+        st.warning("저장 데이터가 손상되어 데모 데이터를 사용합니다.")
+    if st.session_state.pop("_session_persist_restored", False):
+        source = st.session_state.pop("_session_persist_source", "server")
+        label = {"server": "서버", "global": "저장소", "sqlite": "저장소", "browser": "브라우저"}.get(
+            source, "서버"
+        )
+        st.success(f"{label}에서 SKU {len(st.session_state.skus)}건을 복원했습니다.")
     target_days, categories = _render_sidebar()
     skus = _filter_skus(_sku_list(), categories)
 

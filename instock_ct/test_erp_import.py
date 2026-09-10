@@ -8,8 +8,11 @@ from pathlib import Path
 import pandas as pd
 
 from instock_ct.erp_import import (
+    _flatten_excel_columns,
+    _rename_duplicate_gubun_columns,
     apply_expiry_lots_to_skus,
     is_korean_sales_frame,
+    merge_sku_masters,
     parse_native_sales_frame,
     parse_sales_csv,
     parse_sales_upload,
@@ -18,7 +21,9 @@ from instock_ct.erp_import import (
     parse_younglimwon_aggregated_sales,
     parse_younglimwon_inventory,
     read_uploaded_csv,
+    sales_from_sku_masters,
 )
+from instock_ct.models import SkuMaster
 
 SAMPLES = Path(__file__).resolve().parent / "samples"
 
@@ -82,6 +87,64 @@ class ErpImportTests(unittest.TestCase):
         self.assertEqual(skus[0].sku_id, "A-001")
         self.assertAlmostEqual(skus[0].avg_daily_demand, 1.0)
         self.assertEqual(skus[0].on_hand, 100.0)
+        self.assertEqual(skus[0].category_label, "소모품")
+        self.assertEqual(skus[0].category, "general")
+
+    def test_category_prefers_item_class2(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {
+                    "품목코드": "X-1",
+                    "품명": "테스트",
+                    "현재고": 10,
+                    "품목분류1": "일반 소모품",
+                    "품목분류2": "PB",
+                }
+            ]
+        )
+        skus, report = parse_sku_csv(frame, preset="erp_korean")
+        self.assertTrue(report.ok)
+        self.assertEqual(skus[0].category, "pb")
+        self.assertEqual(skus[0].category_label, "PB")
+
+    def test_younglimwon_endoscopy_category(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {
+                    "품목번호": "ENP00001",
+                    "품명": "[내시경]테스트",
+                    "품목분류2": "내시경",
+                    "재고수량": 100,
+                    "출고계": 42,
+                }
+            ]
+        )
+        skus, report = parse_younglimwon_inventory(frame, min_outbound=0)
+        self.assertTrue(report.ok)
+        self.assertEqual(skus[0].category_label, "내시경")
+
+    def test_duplicate_gubun_columns_map_to_class2(self) -> None:
+        frame = pd.DataFrame(
+            [
+                ["ENP00001", "테스트", "대분류", "내시경", 10, 30],
+            ],
+            columns=["품목번호", "품명", "구분", "구분", "재고수량", "출고계"],
+        )
+        frame = _rename_duplicate_gubun_columns(frame)
+        skus, report = parse_younglimwon_inventory(frame, min_outbound=0)
+        self.assertTrue(report.ok)
+        self.assertEqual(skus[0].category_label, "내시경")
+
+    def test_flatten_excel_columns(self) -> None:
+        cols = [
+            ("구분", "품목분류1"),
+            ("구분", "품목분류2"),
+            ("품목번호", "Unnamed: 0_level_1"),
+        ]
+        self.assertEqual(
+            _flatten_excel_columns(cols),
+            ["품목분류1", "품목분류2", "품목번호"],
+        )
 
     def test_parse_minimal_columns(self) -> None:
         frame = pd.DataFrame(
@@ -155,6 +218,108 @@ class ErpImportTests(unittest.TestCase):
         self.assertEqual(len(mc001.expiry_lots), 2)
         self.assertEqual(mc001.nearest_expiry, "2026-10-15")
         self.assertAlmostEqual(mc001.expiring_qty, 120.0)
+
+    def test_sales_from_sku_masters(self) -> None:
+        skus = [
+            SkuMaster(
+                sku_id="A-001",
+                name="Test",
+                category="general",
+                category_label="일반 소모품",
+                on_hand=10,
+                avg_daily_demand=2.5,
+                lead_time_days=7,
+                moq=1,
+                vendor="-",
+                safety_stock_days=7,
+            ),
+            SkuMaster(
+                sku_id="B-002",
+                name="Zero demand",
+                category="general",
+                category_label="일반 소모품",
+                on_hand=5,
+                avg_daily_demand=0,
+                lead_time_days=7,
+                moq=1,
+                vendor="-",
+                safety_stock_days=7,
+            ),
+        ]
+        sales = sales_from_sku_masters(skus)
+        self.assertEqual(len(sales), 1)
+        self.assertEqual(sales[0].sku_id, "A-001")
+        self.assertAlmostEqual(sales[0].qty, 17.5)
+
+    def test_merge_sku_masters_modes(self) -> None:
+        existing = [
+            SkuMaster(
+                sku_id="A",
+                name="Alpha",
+                category="general_consumable",
+                category_label="일반 소모품",
+                on_hand=10,
+                avg_daily_demand=1.0,
+                lead_time_days=7,
+                moq=1,
+                vendor="-",
+                safety_stock_days=7,
+            ),
+            SkuMaster(
+                sku_id="B",
+                name="Beta",
+                category="general_consumable",
+                category_label="일반 소모품",
+                on_hand=20,
+                avg_daily_demand=2.0,
+                lead_time_days=7,
+                moq=1,
+                vendor="-",
+                safety_stock_days=7,
+            ),
+        ]
+        imported = [
+            SkuMaster(
+                sku_id="A",
+                name="Alpha updated",
+                category="general_consumable",
+                category_label="일반 소모품",
+                on_hand=99,
+                avg_daily_demand=9.0,
+                lead_time_days=7,
+                moq=1,
+                vendor="-",
+                safety_stock_days=7,
+            ),
+            SkuMaster(
+                sku_id="C",
+                name="Charlie",
+                category="general_consumable",
+                category_label="일반 소모품",
+                on_hand=5,
+                avg_daily_demand=0.5,
+                lead_time_days=7,
+                moq=1,
+                vendor="-",
+                safety_stock_days=7,
+            ),
+        ]
+
+        replaced, stats = merge_sku_masters(existing, imported, mode="replace")
+        self.assertEqual(len(replaced), 2)
+        self.assertEqual(stats["total"], 2)
+
+        merged, stats = merge_sku_masters(existing, imported, mode="merge")
+        self.assertEqual([s.sku_id for s in merged], ["A", "B", "C"])
+        self.assertEqual(merged[0].on_hand, 99)
+        self.assertEqual(stats["updated"], 1)
+        self.assertEqual(stats["added"], 1)
+
+        appended, stats = merge_sku_masters(existing, imported, mode="append")
+        self.assertEqual([s.sku_id for s in appended], ["A", "B", "C"])
+        self.assertEqual(appended[0].on_hand, 10)
+        self.assertEqual(stats["skipped"], 1)
+        self.assertEqual(stats["added"], 1)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import io
 from dataclasses import dataclass, field
 
@@ -42,8 +43,6 @@ ERP_KOREAN_SKU_MAP: dict[str, str] = {
     "품목명": "name",
     "카테고리": "category_label",
     "분류": "category_label",
-    "품목분류1": "category_label",
-    "품목분류2": "category_label",
     "현재고": "on_hand",
     "현재재고": "on_hand",
     "재고수량": "on_hand",
@@ -113,7 +112,7 @@ CATEGORY_LABEL_TO_CODE: dict[str, str] = {
     "의료기기 소mo품": "medical_consumable",
     "의료기기 소모품": "medical_consumable",
     "의료소mo품": "medical_consumable",
-    "소mo품": "medical_consumable",
+    "소mo품": "general",
     "pb": "pb",
     "PB": "pb",
     "자사PB": "pb",
@@ -125,10 +124,18 @@ CATEGORY_LABEL_TO_CODE: dict[str, str] = {
     "장비": "medical_equipment",
 }
 
+_CATEGORY_SOURCE_KEYS = ("품목분류2", "품목분류1", "카테고리", "분류")
+
 PRESET_LABELS = {
     "instock_native": "기본 형식 (영문 컬럼)",
     "erp_korean": "ERP 한글 형식 (품목코드·현재고·일평균출고)",
     "younglimwon": "영림원 재고현황 (품목번호·재고수량·출고계)",
+}
+
+MERGE_MODE_LABELS = {
+    "replace": "전체 교체 (기존 데이터 삭제)",
+    "merge": "병합 (같은 품목코드는 파일 값으로 갱신)",
+    "append": "신규만 추가 (기존 품목은 유지)",
 }
 
 
@@ -175,6 +182,71 @@ def _normalize_columns(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _normalize_column_key(name: str) -> str:
+    return str(name).strip().replace(" ", "").replace("_", "").lower()
+
+
+def _column_lookup(frame: pd.DataFrame) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    for col in frame.columns:
+        lookup[_normalize_column_key(col)] = col
+    return lookup
+
+
+def _find_source_column(frame: pd.DataFrame, *candidates: str) -> str | None:
+    lookup = _column_lookup(frame)
+    for cand in candidates:
+        key = _normalize_column_key(cand)
+        if key in lookup:
+            return lookup[key]
+    for cand in candidates:
+        key = _normalize_column_key(cand)
+        for norm, col in lookup.items():
+            if norm == key or norm.endswith(key) or key in norm:
+                return col
+    return None
+
+
+def _series_from_column(frame: pd.DataFrame, column: str) -> pd.Series:
+    def _clean(value: object) -> str:
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return ""
+        text = str(value).strip()
+        if text.lower() in {"", "none", "nan", "-"}:
+            return ""
+        return text
+
+    return frame[column].map(_clean)
+
+
+def _inject_category_column(frame: pd.DataFrame) -> pd.DataFrame:
+    """Coalesce ERP category columns; 품목분류2 takes priority over 품목분류1."""
+    out = _normalize_columns(frame)
+    source_columns: list[str] = []
+    for key in _CATEGORY_SOURCE_KEYS:
+        col = _find_source_column(out, key)
+        if col is not None and col not in source_columns:
+            source_columns.append(col)
+
+    if not source_columns:
+        return out
+
+    coalesced = pd.Series([""] * len(out), index=out.index, dtype=object)
+    for key in _CATEGORY_SOURCE_KEYS:
+        col = _find_source_column(out, key)
+        if col is None:
+            continue
+        values = _series_from_column(out, col)
+        coalesced = coalesced.where(coalesced != "", values)
+
+    out = out.copy()
+    out["카테고리"] = coalesced
+    for col in source_columns:
+        if col != "카테고리":
+            out = out.drop(columns=[col])
+    return out
+
+
 def _rename_with_map(frame: pd.DataFrame, column_map: dict[str, str]) -> pd.DataFrame:
     rename: dict[str, str] = {}
     for col in frame.columns:
@@ -195,13 +267,29 @@ def _resolve_category(label: str) -> tuple[str, str]:
         return "general", CATEGORIES["general"]
     code = CATEGORY_LABEL_TO_CODE.get(text)
     if code:
-        return code, CATEGORIES[code]
+        return code, text
     lowered = text.lower()
     for key, cat_code in CATEGORY_LABEL_TO_CODE.items():
         if key.lower() == lowered:
-            return cat_code, CATEGORIES[cat_code]
+            return cat_code, text
     if text in CATEGORIES:
         return text, CATEGORIES[text]
+
+    compact = text.replace(" ", "")
+    if "한약" in compact:
+        return "herbal", text
+    upper = compact.upper()
+    if upper == "PB" or upper.startswith("PB"):
+        return "pb", text
+    if "의료기기" in compact and "소모" in compact:
+        return "medical_consumable", text
+    if "의료" in compact and "소모" in compact:
+        return "medical_consumable", text
+    if "소모" in compact:
+        return "general", text
+    if "의료기기" in compact or "장비" in compact:
+        return "medical_equipment", text
+
     return "general", text
 
 
@@ -238,26 +326,200 @@ def read_uploaded_csv(upload) -> pd.DataFrame:
     return pd.read_csv(io.BytesIO(raw), encoding="utf-8", errors="replace")
 
 
+def _flatten_excel_columns(columns: object) -> list[str]:
+    """Flatten MultiIndex / tuple headers from 영림원 2-row exports."""
+    names: list[str] = []
+    for col in columns:
+        if isinstance(col, tuple):
+            parts: list[str] = []
+            for part in col:
+                text = str(part).strip()
+                if not text or text.lower().startswith("unnamed"):
+                    continue
+                parts.append(text)
+            if parts:
+                names.append(parts[-1])
+            else:
+                names.append(str(col[-1]).strip())
+        else:
+            names.append(str(col).strip())
+    return names
+
+
+def _detect_single_header_row(preview: pd.DataFrame) -> int:
+    keywords = {"품목번호", "품목코드", "품목분류2", "재고수량", "출고계", "품명", "품목명"}
+    best_row = 1
+    best_score = -1
+    for i in range(min(12, len(preview))):
+        row_vals = {
+            str(value).strip()
+            for value in preview.iloc[i].values
+            if pd.notna(value) and str(value).strip()
+        }
+        score = len(row_vals & keywords)
+        if score > best_score:
+            best_score = score
+            best_row = i
+    return best_row if best_score > 0 else 1
+
+
+def _detect_multirow_excel_header(preview: pd.DataFrame) -> list[int] | None:
+    """Detect 영림원-style grouped headers (구분 → 품목분류2)."""
+    for i in range(min(14, len(preview) - 1)):
+        next_vals = {
+            str(value).strip()
+            for value in preview.iloc[i + 1].values
+            if pd.notna(value) and str(value).strip()
+        }
+        if "품목분류2" in next_vals or "품목분류1" in next_vals:
+            return [i, i + 1]
+    return None
+
+
+def _rename_duplicate_gubun_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """영림원 export sometimes repeats '구분' for 분류1/분류2 in one header row."""
+    if _find_source_column(frame, "품목분류2") is not None:
+        return frame
+    cols = [str(c).strip() for c in frame.columns]
+    gubun_indices = [index for index, name in enumerate(cols) if name == "구분"]
+    if len(gubun_indices) >= 2:
+        cols[gubun_indices[0]] = "품목분류1"
+        cols[gubun_indices[1]] = "품목분류2"
+        out = frame.copy()
+        out.columns = cols
+        return out
+    return frame
+
+
+def read_uploaded_excel(upload) -> pd.DataFrame:
+    """Read Excel with auto-detected header rows (영림원 2-row headers supported)."""
+    name = str(getattr(upload, "name", "") or "").lower()
+    engine = "xlrd" if name.endswith(".xls") else None
+    raw = upload.getvalue()
+    upload.seek(0)
+    buffer = io.BytesIO(raw)
+    preview = pd.read_excel(buffer, header=None, nrows=20, engine=engine)
+    buffer.seek(0)
+
+    header_rows = _detect_multirow_excel_header(preview)
+    if header_rows:
+        df = pd.read_excel(io.BytesIO(raw), header=header_rows, engine=engine)
+        df.columns = _flatten_excel_columns(df.columns)
+    else:
+        header_row = _detect_single_header_row(preview)
+        df = pd.read_excel(io.BytesIO(raw), header=header_row, engine=engine)
+
+    upload.seek(0)
+    df = _rename_duplicate_gubun_columns(_normalize_columns(df))
+    upload.seek(0)
+    return df
+
+
 def read_uploaded_table(upload) -> pd.DataFrame:
     """Read CSV or Excel upload into a DataFrame."""
     name = str(getattr(upload, "name", "") or "").lower()
     if name.endswith((".xlsx", ".xls")):
-        raw = upload.getvalue()
-        upload.seek(0)
-        engine = "xlrd" if name.endswith(".xls") else None
-        for header in (0, 1):
-            frame = _normalize_columns(
-                pd.read_excel(io.BytesIO(raw), header=header, engine=engine)
-            )
-            if (
-                is_younglimwon_inventory_frame(frame)
-                or is_wms_expiry_frame(frame)
-                or is_korean_sales_frame(frame)
-                or is_inventory_export_frame(frame)
-            ):
-                return frame
-        return _normalize_columns(pd.read_excel(io.BytesIO(raw), header=0, engine=engine))
+        return read_uploaded_excel(upload)
     return read_uploaded_csv(upload)
+
+
+def parse_inventory_upload(
+    upload,
+    *,
+    preset: str = "erp_korean",
+    min_outbound: float = 10.0,
+    period_days: float = 30.0,
+) -> tuple[list[SkuMaster], ImportReport]:
+    """Parse a CSV/Excel inventory upload into SKU masters."""
+    raw = read_uploaded_table(upload)
+    if preset == "younglimwon" or is_younglimwon_inventory_frame(raw):
+        return parse_younglimwon_inventory(
+            raw,
+            min_outbound=min_outbound,
+            period_days=period_days,
+        )
+    return parse_sku_csv(raw, preset=preset)
+
+
+def merge_sku_masters(
+    existing: list[SkuMaster],
+    imported: list[SkuMaster],
+    *,
+    mode: str = "merge",
+) -> tuple[list[SkuMaster], dict[str, int]]:
+    """Combine imported SKUs with the current master list."""
+    if mode == "replace":
+        merged = copy.deepcopy(imported)
+        return merged, {
+            "added": len(imported),
+            "updated": 0,
+            "skipped": 0,
+            "total": len(merged),
+        }
+
+    by_id = {sku.sku_id: copy.deepcopy(sku) for sku in existing}
+    order = [sku.sku_id for sku in existing]
+    added = updated = skipped = 0
+
+    for sku in imported:
+        if sku.sku_id in by_id:
+            if mode == "merge":
+                by_id[sku.sku_id] = sku
+                updated += 1
+            else:
+                skipped += 1
+        else:
+            by_id[sku.sku_id] = sku
+            order.append(sku.sku_id)
+            added += 1
+
+    merged = [by_id[sku_id] for sku_id in order]
+    return merged, {
+        "added": added,
+        "updated": updated,
+        "skipped": skipped,
+        "total": len(merged),
+    }
+
+
+def sales_from_sku_masters(
+    skus: list[SkuMaster],
+    *,
+    week_label: str = "마스터(일평균환산)",
+) -> list[WeeklySales]:
+    """Build weekly-equivalent sales rows from master avg_daily_demand."""
+    sales: list[WeeklySales] = []
+    for sku in skus:
+        if sku.avg_daily_demand <= 0:
+            continue
+        sales.append(
+            WeeklySales(
+                sku_id=sku.sku_id,
+                week_start=week_label,
+                qty=round(sku.avg_daily_demand * 7.0, 2),
+            )
+        )
+    return sales
+
+
+def sync_sales_from_inventory(
+    raw: pd.DataFrame,
+    skus: list[SkuMaster],
+    *,
+    preset: str = "erp_korean",
+    min_outbound: float = 0.0,
+    period_days: float = 30.0,
+) -> list[WeeklySales]:
+    """Derive forecast sales from upload file, falling back to master daily demand."""
+    sales, report = parse_sales_upload(
+        raw,
+        preset=preset,
+        min_outbound=min_outbound,
+        period_days=period_days,
+    )
+    if report.ok and sales:
+        return sales
+    return sales_from_sku_masters(skus)
 
 
 def prepare_younglimwon_inventory(
@@ -283,10 +545,10 @@ def prepare_younglimwon_inventory(
     period = max(1.0, float(period_days))
     avg_daily = (work["출고계"] / period).round(2)
 
-    category = work.get("품목분류2")
-    if category is None or category.isna().all():
-        category = work.get("품목분류1", "일반 소모품")
-    category = category.fillna("일반 소모품").astype(str)
+    work = _inject_category_column(work)
+    category = work.get("카테고리", pd.Series(["일반 소모품"] * len(work), index=work.index))
+    category = category.fillna("").astype(str)
+    category = category.where(category != "", "일반 소모품")
 
     name_col = "품목명" if "품목명" in work.columns else "품명"
     if name_col not in work.columns:
@@ -330,6 +592,9 @@ def parse_sku_csv(
     preset: str = "erp_korean",
 ) -> tuple[list[SkuMaster], ImportReport]:
     frame = _normalize_columns(frame)
+    frame = _rename_duplicate_gubun_columns(frame)
+    if preset != "instock_native":
+        frame = _inject_category_column(frame)
     if preset == "instock_native":
         mapped = frame.copy()
         mapped.columns = [c.lower() for c in mapped.columns]
