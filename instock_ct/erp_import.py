@@ -485,9 +485,17 @@ def merge_sku_masters(
 def sales_from_sku_masters(
     skus: list[SkuMaster],
     *,
-    week_label: str = "마스터(일평균환산)",
+    week_label: str | None = None,
+    period_days: float = 30.0,
+    period_end_date: str | None = None,
 ) -> list[WeeklySales]:
     """Build weekly-equivalent sales rows from master avg_daily_demand."""
+    label = week_label
+    if label is None:
+        if period_end_date:
+            label = format_younglimwon_period_label(period_days, period_end_date)
+        else:
+            label = "마스터(일평균환산)"
     sales: list[WeeklySales] = []
     for sku in skus:
         if sku.avg_daily_demand <= 0:
@@ -495,7 +503,7 @@ def sales_from_sku_masters(
         sales.append(
             WeeklySales(
                 sku_id=sku.sku_id,
-                week_start=week_label,
+                week_start=label,
                 qty=round(sku.avg_daily_demand * 7.0, 2),
             )
         )
@@ -509,6 +517,7 @@ def sync_sales_from_inventory(
     preset: str = "erp_korean",
     min_outbound: float = 0.0,
     period_days: float = 30.0,
+    period_end_date: str | None = None,
 ) -> list[WeeklySales]:
     """Derive forecast sales from upload file, falling back to master daily demand."""
     sales, report = parse_sales_upload(
@@ -516,10 +525,15 @@ def sync_sales_from_inventory(
         preset=preset,
         min_outbound=min_outbound,
         period_days=period_days,
+        period_end_date=period_end_date,
     )
     if report.ok and sales:
         return sales
-    return sales_from_sku_masters(skus)
+    return sales_from_sku_masters(
+        skus,
+        period_days=period_days,
+        period_end_date=period_end_date,
+    )
 
 
 def prepare_younglimwon_inventory(
@@ -725,11 +739,24 @@ def parse_sales_csv(
     return sales, report
 
 
+def format_younglimwon_period_label(
+    period_days: float,
+    period_end_date: str | None = None,
+) -> str:
+    period = max(1, int(round(float(period_days))))
+    if period_end_date:
+        end = str(period_end_date).strip()[:10]
+        if end:
+            return f"{end} ({period}일 합계)"
+    return f"기간합계({period}일)"
+
+
 def parse_younglimwon_aggregated_sales(
     frame: pd.DataFrame,
     *,
     min_outbound: float = 0.0,
     period_days: float = 30.0,
+    period_end_date: str | None = None,
 ) -> tuple[list[WeeklySales], ImportReport]:
     """Convert 영림원 재고현황(출고계) into weekly-equivalent shipment rows."""
     df = _normalize_columns(frame)
@@ -755,7 +782,7 @@ def parse_younglimwon_aggregated_sales(
         work = work[work[outbound_col] >= min_outbound].copy()
 
     period = max(1.0, float(period_days))
-    week_start = f"기간합계({int(period)}일)"
+    week_start = format_younglimwon_period_label(period, period_end_date)
     sales: list[WeeklySales] = []
     for _, row in work.iterrows():
         sku_id = str(row["품목번호"]).strip()
@@ -774,7 +801,8 @@ def parse_younglimwon_aggregated_sales(
         report.messages.append(note)
         report.warnings.append(
             "주간별 추이가 없어 기간 합계를 한 주치로 환산했습니다. "
-            "결품·발주는 왼쪽 재고 가져오기의 일평균출고를 우선 사용하세요."
+            f"기준: {week_start}. "
+            "결품·발주는 재고 가져오기의 일평균출고를 우선 사용하세요."
         )
     else:
         report.messages.append("읽을 수 있는 출고 행이 없습니다.")
@@ -787,6 +815,7 @@ def parse_sales_upload(
     preset: str = "erp_korean",
     min_outbound: float = 0.0,
     period_days: float = 30.0,
+    period_end_date: str | None = None,
 ) -> tuple[list[WeeklySales], ImportReport]:
     """Parse weekly shipment CSV or 영림원 aggregated outbound exports."""
     frame = _normalize_columns(frame)
@@ -800,6 +829,7 @@ def parse_sales_upload(
             frame,
             min_outbound=min_outbound,
             period_days=period_days,
+            period_end_date=period_end_date,
         )
 
     if is_inventory_export_frame(frame):

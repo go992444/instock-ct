@@ -11,6 +11,7 @@ from instock_ct.erp_import import (
     _flatten_excel_columns,
     _rename_duplicate_gubun_columns,
     apply_expiry_lots_to_skus,
+    format_younglimwon_period_label,
     is_korean_sales_frame,
     merge_sku_masters,
     parse_native_sales_frame,
@@ -171,6 +172,22 @@ class ErpImportTests(unittest.TestCase):
         self.assertEqual(len(sales), 1)
         self.assertEqual(sales[0].sku_id, "A-001")
         self.assertAlmostEqual(sales[0].qty, 7.0)
+        self.assertEqual(sales[0].week_start, "기간합계(30일)")
+
+    def test_younglimwon_period_end_date_label(self) -> None:
+        frame = pd.DataFrame([{"품목번호": "A-001", "출고계": 30, "재고수량": 100}])
+        sales, report = parse_younglimwon_aggregated_sales(
+            frame,
+            min_outbound=0,
+            period_days=30,
+            period_end_date="2026-09-10",
+        )
+        self.assertTrue(report.ok)
+        self.assertEqual(sales[0].week_start, "2026-09-10 (30일 합계)")
+        self.assertEqual(
+            format_younglimwon_period_label(30, "2026-09-10"),
+            "2026-09-10 (30일 합계)",
+        )
 
     def test_parse_sales_upload_redirects_inventory(self) -> None:
         frame = pd.read_csv(SAMPLES / "erp_inventory_export.sample.csv")
