@@ -237,6 +237,73 @@ def _render_younglimwon_date_range(
     return float(min_out), period_days
 
 
+def _forecast_upload_period_start_iso() -> str | None:
+    return _date_to_iso(st.session_state.get("forecast_ship_start_date"))
+
+
+def _forecast_upload_period_end_iso() -> str | None:
+    return _date_to_iso(st.session_state.get("forecast_ship_end_date"))
+
+
+def _forecast_upload_period_days() -> float:
+    start = st.session_state.get("forecast_ship_start_date")
+    end = st.session_state.get("forecast_ship_end_date")
+    if start is not None and end is not None:
+        try:
+            return float(max(1, (end - start).days + 1))
+        except TypeError:
+            pass
+    return float(st.session_state.get("forecast_ship_period_days", 30.0))
+
+
+def _forecast_upload_period_label() -> str:
+    return format_younglimwon_period_label(
+        _forecast_upload_period_days(),
+        _forecast_upload_period_end_iso(),
+        _forecast_upload_period_start_iso(),
+    )
+
+
+def _render_forecast_upload_period_inputs() -> tuple[float, float]:
+    """Date range for the weekly shipment file being uploaded (not ERP master)."""
+    default_end = date.today()
+    default_start = default_end - timedelta(days=29)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.date_input(
+            "이 파일 출고 시작일",
+            value=default_start,
+            help="업로드 파일에 날짜가 없을 때 — 출고 집계 시작",
+            key="forecast_ship_start_date",
+        )
+    with c2:
+        st.date_input(
+            "이 파일 출고 종료일",
+            value=default_end,
+            help="업로드 파일에 날짜가 없을 때 — 출고 집계 종료",
+            key="forecast_ship_end_date",
+        )
+    with c3:
+        min_out = st.number_input(
+            "출고계 최소 (영림원)",
+            min_value=0.0,
+            value=float(st.session_state.get("ylw_min_outbound", 10.0)),
+            step=1.0,
+            key="forecast_ship_min_outbound",
+        )
+    start = st.session_state.get("forecast_ship_start_date")
+    end = st.session_state.get("forecast_ship_end_date")
+    period_days = _forecast_upload_period_days()
+    st.session_state["forecast_ship_period_days"] = int(period_days)
+    if start and end and end < start:
+        st.error("출고 종료일은 시작일과 같거나 이후여야 합니다.")
+    st.caption(
+        f"이 업로드 파일 기간 **{_forecast_upload_period_label()}** · "
+        f"일평균 = 출고계 ÷ {int(period_days)}"
+    )
+    return float(min_out), period_days
+
+
 RISK_COLORS = {
     "critical": "🔴",
     "warning": "🟡",
@@ -1390,31 +1457,23 @@ def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
         "마스터/영림원 기간 1건이면 **주·월 평균**만 표시(추이 없음)"
     )
 
-    _render_younglimwon_date_range(
-        show_min_outbound=False,
-        title="**출고계 데이터 기간 (며칠~며칠)**",
-    )
-    period_label = _younglimwon_period_label()
-    period_days = _younglimwon_period_days()
-    period_end = _younglimwon_period_end_iso()
-    period_start = _younglimwon_period_start_iso()
-
     sample_df = pd.DataFrame(weekly_sales_to_dataframe_rows(build_sample_weekly_sales()))
     master_sales = sales_from_sku_masters(
         skus,
-        period_days=period_days,
-        period_end_date=period_end,
-        period_start_date=period_start,
+        period_days=_younglimwon_period_days(),
+        period_end_date=_younglimwon_period_end_iso(),
+        period_start_date=_younglimwon_period_start_iso(),
     )
     if st.session_state.get("imported_sales"):
+        linked_label = st.session_state.imported_sales[0].week_start
         st.success(
             f"출고·수요 데이터 {len(st.session_state.imported_sales)}건 · "
-            f"기간 **{period_label}** (③ 데이터 연동)"
+            f"기간 **{linked_label}** (③ 데이터 연동)"
         )
     elif master_sales:
         st.success(
             f"마스터 일평균출고 {len(master_sales)}건 · "
-            f"기간 **{period_label}** 로 환산"
+            f"기간 **{master_sales[0].week_start}** 로 환산"
         )
 
     st.download_button(
@@ -1428,8 +1487,8 @@ def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
     preset = st.session_state.get("forecast_preset", "erp_korean")
     with st.expander("주간 출고 CSV / Excel 추가 업로드 (선택)", expanded=False):
         st.caption(
-            "별도 주간 이력 또는 **영림원 재고현황(2.xlsx)** 을 올릴 수 있습니다. "
-            "없으면 마스터·ERP 데이터를 자동 사용합니다."
+            "파일에 **주간시작일**이 없으면(영림원 2.xlsx 등) 아래에서 "
+            "**며칠~며칠 출고분인지** 꼭 지정하세요."
         )
         uploaded = st.file_uploader(
             "주간 출고 CSV / Excel",
@@ -1443,10 +1502,13 @@ def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
             horizontal=True,
             key="forecast_preset",
         )
+        upload_min_out, upload_period_days = _render_forecast_upload_period_inputs()
 
     sales: list[WeeklySales] | None = None
     frame: pd.DataFrame
     load_warnings: list[str] = []
+    upload_period_end = _forecast_upload_period_end_iso()
+    upload_period_start = _forecast_upload_period_start_iso()
 
     if uploaded:
         try:
@@ -1454,24 +1516,37 @@ def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
         except Exception as exc:
             st.error(f"파일을 읽을 수 없습니다: {exc}")
             return
+        file_has_week_dates = is_korean_sales_frame(raw) or "week_start" in {
+            str(c).strip().lower() for c in raw.columns
+        }
         use_korean = preset == "erp_korean" or is_korean_sales_frame(raw)
-        if use_korean and preset == "erp_korean" and is_korean_sales_frame(raw):
+        if (
+            use_korean
+            and preset == "erp_korean"
+            and is_korean_sales_frame(raw)
+            and file_has_week_dates
+        ):
             sales, report = parse_sales_csv(raw, preset="erp_korean")
         else:
             if preset != "erp_korean" and is_korean_sales_frame(raw):
                 st.info("한글 컬럼(품목코드·주간시작일·출고수량)이 감지되어 ERP 한글 형식으로 읽습니다.")
+            if not file_has_week_dates:
+                st.info(f"파일에 날짜 없음 → **{_forecast_upload_period_label()}** 기준으로 환산합니다.")
             sales, report = parse_sales_upload(
                 raw,
                 preset=preset,
-                min_outbound=float(st.session_state.get("ylw_min_outbound", 10.0)),
-                period_days=period_days,
-                period_end_date=period_end,
-                period_start_date=period_start,
+                min_outbound=float(upload_min_out),
+                period_days=upload_period_days,
+                period_end_date=upload_period_end,
+                period_start_date=upload_period_start,
             )
         if not report.ok:
             st.error("; ".join(report.messages))
             return
         load_warnings = report.warnings
+        st.success(
+            f"업로드 파일 {len(sales)}건 반영 · 기간 **{_forecast_upload_period_label()}**"
+        )
         frame = pd.DataFrame(
             [{"sku_id": s.sku_id, "week_start": s.week_start, "qty": s.qty} for s in sales]
         )
