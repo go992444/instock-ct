@@ -610,7 +610,7 @@ def parse_sku_csv(
         return [], report
     if "avg_daily_demand" not in mapped.columns:
         report.warnings.append(
-            "일평균출고 컬럼 없음 — 0으로 처리합니다. 출고 CSV 업로드 또는 ⑦ 마스터 편집으로 보완하세요."
+            "일평균출고 컬럼 없음 — 0으로 처리합니다. 출고 CSV 업로드 또는 ③ 데이터 연동 → 마스터 편집으로 보완하세요."
         )
 
     skus: list[SkuMaster] = []

@@ -87,6 +87,7 @@ from instock_ct.expiry_engine import (  # noqa: E402
     parse_expiry_date,
     summarize_expiry_counts,
 )
+from instock_ct.models import ExpiryAlert  # noqa: E402
 
 _SAMPLES_DIR = _APP_DIR / "samples"
 
@@ -106,13 +107,9 @@ EXPIRY_COLORS = {
 }
 
 TAB_OPTIONS: tuple[str, ...] = (
-    "① 결품 위험",
-    "② 발주 추천",
-    "③ 프로모션 영향",
-    "④ 수요 예측",
-    "⑤ ERP 연동",
-    "⑥ 유통기한",
-    "⑦ 마스터 편집",
+    "① 재고·발주·유통기한",
+    "② 수요·프로모션",
+    "③ 데이터 연동",
 )
 
 
@@ -191,7 +188,7 @@ def _category_shares(skus: list[SkuMaster]) -> list[tuple[str, float, int]]:
 def _render_sidebar() -> tuple[float, str | None]:
     st.sidebar.header("Instock CT")
     st.sidebar.caption("Medi Market형 B2B 의료 소모품 · 발주·재고 시범")
-    st.sidebar.caption("📌 **⑦ 마스터 편집** — 재고·품목·유통기한 표에서 직접 수정")
+    st.sidebar.caption("📌 **③ 데이터 연동** — ERP·WMS 업로드 · 마스터 편집")
     target_days = st.sidebar.slider(
         "목표 재고 유지일",
         7,
@@ -386,7 +383,6 @@ def tab_master_edit(skus: list[SkuMaster]) -> None:
 
 @st.fragment
 def _render_master_edit(skus: list[SkuMaster]) -> None:
-    st.subheader("재고·품목 마스터 편집")
     st.caption("표에서 값을 수정한 뒤 **변경사항 저장** — 다른 탭에 즉시 반영됩니다. 행 추가·삭제도 가능합니다.")
 
     flash = st.session_state.pop("master_save_flash", None)
@@ -399,7 +395,7 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
             "ERP·영림원·최소 4컬럼 형식을 지원합니다. "
             "카테고리는 **품목분류2** 값이 우선 반영됩니다. "
             "파일 선택 후 **가져오기 실행**을 누르세요. "
-            "가져온 **일평균출고**는 ④ 수요 예측·② 발주에 자동 연동됩니다."
+            "가져온 **일평균출고**는 ② 수요·프로모션·① 발주에 자동 연동됩니다."
         )
         bulk_preset = st.radio(
             "파일 형식",
@@ -492,7 +488,7 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
                     parts.append(f"건너뜀 {stats['skipped']}건")
                 parts.append(f"총 {stats['total']}건")
                 if st.session_state.imported_sales:
-                    parts.append(f"④ 수요예측 {len(st.session_state.imported_sales)}건 연동")
+                    parts.append(f"② 수요·프로모션 {len(st.session_state.imported_sales)}건 연동")
                 saved = _save_session()
                 parts.append(persist_result_message(saved).strip())
                 st.session_state.master_save_flash = " · ".join(parts)
@@ -573,7 +569,7 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
             sales_count = len(st.session_state.imported_sales or [])
             flash = f"SKU {len(parsed)}건 저장되었습니다."
             if sales_count:
-                flash += f" ④ 수요예측 {sales_count}건 연동."
+                flash += f" ② 수요·프로모션 {sales_count}건 연동."
             saved = _save_session()
             flash += persist_result_message(saved)
             st.session_state.master_save_flash = flash
@@ -621,129 +617,16 @@ def _collect_turnover_threshold_inputs() -> tuple[dict[str, float] | None, list[
     return thresholds, []
 
 
-def tab_stockout_board(skus: list[SkuMaster], target_days: float) -> None:
-    _render_stockout_board(skus)
+def _worst_expiry_by_sku(alerts: list[ExpiryAlert]) -> dict[str, ExpiryAlert]:
+    worst: dict[str, ExpiryAlert] = {}
+    for alert in alerts:
+        prev = worst.get(alert.sku_id)
+        if prev is None or alert.days_remaining < prev.days_remaining:
+            worst[alert.sku_id] = alert
+    return worst
 
 
-@st.fragment
-def _render_stockout_board(skus: list[SkuMaster]) -> None:
-    st.subheader("결품 위험 · 재고 회전")
-    st.caption("재고일수·연간 회전율 — 결품 임박과 카테고리별 저회전(과잉) 재고 확인")
-
-    if "turnover_thresholds" not in st.session_state:
-        st.session_state.turnover_thresholds = _default_turnover_thresholds()
-    if "turnover_settings_rev" not in st.session_state:
-        st.session_state.turnover_settings_rev = 0
-
-    with st.expander("카테고리별 저회전 기준", expanded=False):
-        draft_turnover, turnover_errors = _collect_turnover_threshold_inputs()
-        t1, t2 = st.columns([1, 3])
-        with t1:
-            apply_turnover = st.button("기준 적용", type="primary", use_container_width=True, key="turnover_apply")
-        with t2:
-            reset_turnover = st.button("기본값 복원", use_container_width=True, key="turnover_reset")
-        if reset_turnover:
-            st.session_state.turnover_thresholds = _default_turnover_thresholds()
-            st.session_state.turnover_settings_rev += 1
-            st.rerun()
-        if apply_turnover:
-            if turnover_errors:
-                for msg in turnover_errors[:5]:
-                    st.error(msg)
-            elif draft_turnover:
-                st.session_state.turnover_thresholds = draft_turnover
-                st.success("카테고리별 저회전 기준을 저장했습니다.")
-
-    turnover_thresholds = (
-        draft_turnover if draft_turnover else st.session_state.turnover_thresholds
-    )
-
-    risks = [assess_stockout_risk(s) for s in skus]
-    counts = summarize_risk_counts(risks)
-    slow_movers = filter_slow_movers(risks, thresholds_by_category=turnover_thresholds)
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("🔴 결품 임박", counts["critical"])
-    c2.metric("🟡 주의", counts["warning"])
-    c3.metric("🟢 양호", counts["ok"])
-    c4.metric("📉 저회전", len(slow_movers))
-    c5.metric("SKU 수", len(skus))
-
-    rows = []
-    for row in sorted(risks, key=lambda item: item.days_of_supply):
-        turnover_display = (
-            round(row.annual_turnover, 1) if row.annual_turnover is not None else None
-        )
-        rows.append(
-            {
-                "위험": f"{RISK_COLORS[row.risk_level]} {risk_label(row.risk_level)}",
-                "SKU": row.sku_id,
-                "품명": row.name,
-                "카테고리": row.category_label,
-                "현재고": row.on_hand,
-                "일평균 출고": round(row.avg_daily_demand, 1),
-                "재고일수": round(row.days_of_supply, 1),
-                "연간 회전(회)": turnover_display,
-                "권장 발주량": row.reorder_qty,
-                "거래처": row.vendor,
-            }
-        )
-    st.dataframe(
-        pd.DataFrame(rows),
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "현재고": st.column_config.NumberColumn(format="%.0f"),
-            "일평균 출고": st.column_config.NumberColumn(format="%.1f"),
-            "재고일수": st.column_config.NumberColumn(format="%.1f"),
-            "연간 회전(회)": st.column_config.NumberColumn(
-                format="%.1f",
-                help="365 ÷ 재고일수 (연간 수량 기준)",
-            ),
-        },
-    )
-
-    critical = [r for r in risks if r.risk_level == "critical"]
-    if critical:
-        st.warning(
-            f"결품 임박 SKU {len(critical)}건 — 영업·물류팀 공유 필요: "
-            + ", ".join(r.sku_id for r in critical[:8])
-            + (" …" if len(critical) > 8 else "")
-        )
-
-    st.markdown("**저회전 재고 (카테고리별 기준 미만)**")
-    if slow_movers:
-        slow_rows = []
-        for row in slow_movers[:15]:
-            cutoff = get_turnover_threshold(row.category, turnover_thresholds)
-            slow_rows.append(
-                {
-                    "위험": f"{RISK_COLORS[row.risk_level]} {risk_label(row.risk_level)}",
-                    "SKU": row.sku_id,
-                    "품명": row.name,
-                    "카테고리": row.category_label,
-                    "현재고": row.on_hand,
-                    "재고일수": round(row.days_of_supply, 1),
-                    "연간 회전(회)": round(row.annual_turnover or 0, 1),
-                    "저회전 기준": round(cutoff, 1),
-                    "비고": "발주·입고 억제 검토" if row.risk_level == "ok" else "결품·과잉 동시 점검",
-                }
-            )
-        st.dataframe(
-            pd.DataFrame(slow_rows),
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "현재고": st.column_config.NumberColumn(format="%.0f"),
-                "재고일수": st.column_config.NumberColumn(format="%.1f"),
-                "연간 회전(회)": st.column_config.NumberColumn(format="%.1f"),
-            },
-        )
-    else:
-        st.caption("현재 기준에 해당하는 저회전 SKU가 없습니다.")
-
-
-def tab_reorder(skus: list[SkuMaster], target_days: float) -> None:
-    st.subheader("발주 추천 (MOQ · 리드타임 · 안전재고)")
+def _render_reorder_section(skus: list[SkuMaster], target_days: float) -> None:
     plans = [build_reorder_plan(s, target_coverage_days=target_days) for s in skus]
     need_order = [p for p in plans if p.recommended_qty > 0]
     st.metric("발주 필요 SKU", len(need_order), delta=f"전체 {len(skus)} SKU")
@@ -781,15 +664,38 @@ def tab_reorder(skus: list[SkuMaster], target_days: float) -> None:
     st.divider()
     st.markdown("**품목별 발주 시뮬레이션**")
     sku_ids = [s.sku_id for s in skus]
-    picked = st.selectbox("품목 선택", sku_ids, format_func=lambda sid: f"{sid} — {_skus_by_id()[sid].name}")
+    picked = st.selectbox(
+        "품목 선택",
+        sku_ids,
+        format_func=lambda sid: f"{sid} — {_skus_by_id()[sid].name}",
+        key="ops_reorder_sim_sku",
+    )
     sku = _skus_by_id()[picked]
     col1, col2, col3 = st.columns(3)
     with col1:
-        override_demand = st.number_input("가정 일평균 출고", value=float(sku.avg_daily_demand), min_value=0.0, step=1.0)
+        override_demand = st.number_input(
+            "가정 일평균 출고",
+            value=float(sku.avg_daily_demand),
+            min_value=0.0,
+            step=1.0,
+            key="ops_reorder_sim_demand",
+        )
     with col2:
-        override_lead = st.number_input("리드타임(일)", value=int(sku.lead_time_days), min_value=1, step=1)
+        override_lead = st.number_input(
+            "리드타임(일)",
+            value=int(sku.lead_time_days),
+            min_value=1,
+            step=1,
+            key="ops_reorder_sim_lead",
+        )
     with col3:
-        override_moq = st.number_input("MOQ", value=int(sku.moq), min_value=1, step=1)
+        override_moq = st.number_input(
+            "MOQ",
+            value=int(sku.moq),
+            min_value=1,
+            step=1,
+            key="ops_reorder_sim_moq",
+        )
 
     sim = copy.deepcopy(sku)
     sim.avg_daily_demand = override_demand
@@ -802,8 +708,255 @@ def tab_reorder(skus: list[SkuMaster], target_days: float) -> None:
     m3.metric("안전재고 수량", f"{sim.safety_stock_units:,.0f}")
 
 
+def tab_operations_hub(skus: list[SkuMaster], target_days: float) -> None:
+    _render_operations_hub(skus, target_days)
+
+
+@st.fragment
+def _render_operations_hub(skus: list[SkuMaster], target_days: float) -> None:
+    st.subheader("재고·발주·유통기한")
+    st.caption(
+        "결품 위험 · MOQ/리드타임 발주 · WMS 유통기한을 SKU 한 표에서 확인 — "
+        "세부는 아래 접기 메뉴"
+    )
+
+    if "turnover_thresholds" not in st.session_state:
+        st.session_state.turnover_thresholds = _default_turnover_thresholds()
+    if "turnover_settings_rev" not in st.session_state:
+        st.session_state.turnover_settings_rev = 0
+    if "expiry_thresholds" not in st.session_state:
+        st.session_state.expiry_thresholds = _default_expiry_thresholds()
+    if "expiry_settings_rev" not in st.session_state:
+        st.session_state.expiry_settings_rev = 0
+
+    draft_turnover = None
+    draft_thresholds = None
+
+    with st.expander("카테고리별 저회전 기준", expanded=False):
+        draft_turnover, turnover_errors = _collect_turnover_threshold_inputs()
+        t1, t2 = st.columns([1, 3])
+        with t1:
+            apply_turnover = st.button(
+                "기준 적용",
+                type="primary",
+                use_container_width=True,
+                key="turnover_apply",
+            )
+        with t2:
+            reset_turnover = st.button(
+                "기본값 복원",
+                use_container_width=True,
+                key="turnover_reset",
+            )
+        if reset_turnover:
+            st.session_state.turnover_thresholds = _default_turnover_thresholds()
+            st.session_state.turnover_settings_rev += 1
+            st.rerun()
+        if apply_turnover:
+            if turnover_errors:
+                for msg in turnover_errors[:5]:
+                    st.error(msg)
+            elif draft_turnover:
+                st.session_state.turnover_thresholds = draft_turnover
+                st.success("카테고리별 저회전 기준을 저장했습니다.")
+
+    with st.expander("카테고리별 유통기한 임박·주의 기준", expanded=False):
+        draft_thresholds, draft_errors = _collect_expiry_threshold_inputs()
+        t1, t2 = st.columns([1, 3])
+        with t1:
+            apply_thresholds = st.button(
+                "기준 적용",
+                type="primary",
+                use_container_width=True,
+                key="ops_expiry_apply",
+            )
+        with t2:
+            reset_thresholds = st.button(
+                "기본값 복원",
+                use_container_width=True,
+                key="ops_expiry_reset",
+            )
+        if reset_thresholds:
+            st.session_state.expiry_thresholds = _default_expiry_thresholds()
+            st.session_state.expiry_settings_rev += 1
+            st.rerun()
+        if apply_thresholds:
+            if draft_errors:
+                for msg in draft_errors[:5]:
+                    st.error(msg)
+            elif draft_thresholds:
+                st.session_state.expiry_thresholds = draft_thresholds
+                st.success("카테고리별 유통기한 기준을 저장했습니다.")
+
+    turnover_thresholds = (
+        draft_turnover if draft_turnover else st.session_state.turnover_thresholds
+    )
+    expiry_thresholds = (
+        draft_thresholds if draft_thresholds else st.session_state.expiry_thresholds
+    )
+
+    risks = [assess_stockout_risk(s) for s in skus]
+    risk_by_sku = {r.sku_id: r for r in risks}
+    plans = [build_reorder_plan(s, target_coverage_days=target_days) for s in skus]
+    plan_by_sku = {p.sku_id: p for p in plans}
+    expiry_alerts = build_expiry_lot_alerts(skus, thresholds_by_category=expiry_thresholds)
+    worst_expiry = _worst_expiry_by_sku(expiry_alerts)
+
+    counts = summarize_risk_counts(risks)
+    slow_movers = filter_slow_movers(risks, thresholds_by_category=turnover_thresholds)
+    expiry_counts = summarize_expiry_counts(expiry_alerts)
+    need_order = sum(1 for p in plans if p.recommended_qty > 0)
+
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+    c1.metric("🔴 결품 임박", counts["critical"])
+    c2.metric("🟡 재고 주의", counts["warning"])
+    c3.metric("📦 발주 필요", need_order)
+    c4.metric("⛔ 기한 경과", expiry_counts["expired"])
+    c5.metric("🔴 유통 임박", expiry_counts["critical"])
+    c6.metric("📉 저회전", len(slow_movers))
+    c7.metric("SKU 수", len(skus))
+
+    unified_rows = []
+    for sku in skus:
+        risk = risk_by_sku[sku.sku_id]
+        plan = plan_by_sku[sku.sku_id]
+        exp = worst_expiry.get(sku.sku_id)
+        turnover_display = (
+            round(risk.annual_turnover, 1) if risk.annual_turnover is not None else None
+        )
+        unified_rows.append(
+            {
+                "결품": f"{RISK_COLORS[risk.risk_level]} {risk_label(risk.risk_level)}",
+                "유통기한": (
+                    f"{EXPIRY_COLORS[exp.risk_level]} {expiry_label(exp.risk_level)}"
+                    if exp
+                    else "—"
+                ),
+                "SKU": sku.sku_id,
+                "품명": sku.name,
+                "카테고리": sku.category_label,
+                "현재고": risk.on_hand,
+                "일평균 출고": round(risk.avg_daily_demand, 1),
+                "재고일수": round(risk.days_of_supply, 1),
+                "권장 발주": plan.recommended_qty,
+                "발주점": round(plan.reorder_point, 1),
+                "MOQ": plan.moq,
+                "리드(일)": plan.lead_time_days,
+                "가까운 유통기한": exp.expiry_date if exp else (sku.nearest_expiry or "—"),
+                "잔여일": exp.days_remaining if exp else None,
+                "연간 회전(회)": turnover_display,
+                "거래처": sku.vendor,
+                "_risk_rank": {"critical": 0, "warning": 1, "ok": 2}.get(risk.risk_level, 3),
+                "_exp_rank": (
+                    {"expired": 0, "critical": 1, "warning": 2, "ok": 3}.get(exp.risk_level, 4)
+                    if exp
+                    else 5
+                ),
+                "_dos": risk.days_of_supply,
+            }
+        )
+
+    unified_rows.sort(key=lambda row: (row["_risk_rank"], row["_exp_rank"], row["_dos"]))
+    display_df = pd.DataFrame(unified_rows).drop(
+        columns=["_risk_rank", "_exp_rank", "_dos"], errors="ignore"
+    )
+    st.dataframe(
+        display_df,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "현재고": st.column_config.NumberColumn(format="%.0f"),
+            "일평균 출고": st.column_config.NumberColumn(format="%.1f"),
+            "재고일수": st.column_config.NumberColumn(format="%.1f"),
+            "권장 발주": st.column_config.NumberColumn(format="%.0f"),
+            "발주점": st.column_config.NumberColumn(format="%.1f"),
+            "잔여일": st.column_config.NumberColumn(format="%d"),
+            "연간 회전(회)": st.column_config.NumberColumn(format="%.1f"),
+        },
+    )
+
+    critical = [r for r in risks if r.risk_level == "critical"]
+    if critical:
+        st.warning(
+            f"결품 임박 SKU {len(critical)}건 — 영업·물류팀 공유 필요: "
+            + ", ".join(r.sku_id for r in critical[:8])
+            + (" …" if len(critical) > 8 else "")
+        )
+
+    urgent_expiry = [a for a in expiry_alerts if a.risk_level in ("expired", "critical")]
+    if urgent_expiry:
+        st.warning(
+            f"유통기한 즉시 조치 {len(urgent_expiry)}건: "
+            + ", ".join(f"{a.sku_id}({a.days_remaining}일)" for a in urgent_expiry[:8])
+            + (" …" if len(urgent_expiry) > 8 else "")
+        )
+
+    with st.expander("발주 추천 · ERP CSV · 시뮬레이션", expanded=False):
+        _render_reorder_section(skus, target_days)
+
+    with st.expander("유통기한 LOT · FEFO", expanded=False):
+        _render_expiry_details(skus, expiry_thresholds, expiry_alerts)
+
+    with st.expander("저회전 재고 (카테고리별 기준 미만)", expanded=False):
+        if slow_movers:
+            slow_rows = []
+            for row in slow_movers[:15]:
+                cutoff = get_turnover_threshold(row.category, turnover_thresholds)
+                slow_rows.append(
+                    {
+                        "위험": f"{RISK_COLORS[row.risk_level]} {risk_label(row.risk_level)}",
+                        "SKU": row.sku_id,
+                        "품명": row.name,
+                        "카테고리": row.category_label,
+                        "현재고": row.on_hand,
+                        "재고일수": round(row.days_of_supply, 1),
+                        "연간 회전(회)": round(row.annual_turnover or 0, 1),
+                        "저회전 기준": round(cutoff, 1),
+                        "비고": (
+                            "발주·입고 억제 검토"
+                            if row.risk_level == "ok"
+                            else "결품·과잉 동시 점검"
+                        ),
+                    }
+                )
+            st.dataframe(
+                pd.DataFrame(slow_rows),
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "현재고": st.column_config.NumberColumn(format="%.0f"),
+                    "재고일수": st.column_config.NumberColumn(format="%.1f"),
+                    "연간 회전(회)": st.column_config.NumberColumn(format="%.1f"),
+                },
+            )
+        else:
+            st.caption("현재 기준에 해당하는 저회전 SKU가 없습니다.")
+
+
+def tab_reorder(skus: list[SkuMaster], target_days: float) -> None:
+    st.subheader("발주 추천 (MOQ · 리드타임 · 안전재고)")
+    _render_reorder_section(skus, target_days)
+
+
+def tab_analysis(skus: list[SkuMaster], target_days: float) -> None:
+    st.subheader("수요·프로모션")
+    tab_forecast_panel, tab_promo_panel = st.tabs(["수요 예측", "프로모션 영향"])
+    with tab_forecast_panel:
+        tab_forecast(skus, target_days)
+    with tab_promo_panel:
+        tab_promo(skus)
+
+
+def tab_data(skus: list[SkuMaster]) -> None:
+    st.subheader("데이터 연동")
+    tab_erp_panel, tab_master_panel = st.tabs(["ERP · WMS 가져오기", "마스터 편집"])
+    with tab_erp_panel:
+        tab_erp_import(skus)
+    with tab_master_panel:
+        tab_master_edit(_sku_list())
+
+
 def tab_promo(skus: list[SkuMaster]) -> None:
-    st.subheader("긴급 프로모션 영향 분석")
     st.caption("주 1~2회 긴급 프로모션 가정 — 수요 증가 시 결품·추가 발주량을 추정합니다")
     uplift = st.slider("프로모션 수요 증가 (%)", 0, 80, 30, 5)
     promo_days = st.slider("프로모션 기간 (일)", 3, 14, 7)
@@ -841,12 +994,11 @@ def tab_promo(skus: list[SkuMaster]) -> None:
 
 
 def tab_erp_import(skus: list[SkuMaster]) -> None:
-    st.subheader("ERP·WMS 연동")
     st.caption("사내 ERP 내보내기 CSV → Instock CT · 발주안 CSV → ERP 재등록")
     st.info(
         "**전 컬럼을 손으로 채울 필요 없습니다.** "
         "WMS·ERP·재고 Excel에서 **품목코드·품명·현재고**만 있어도 가져올 수 있습니다. "
-        "나머지(리드타임·MOQ·유통기한 등)는 없으면 기본값이 들어가고, **⑦ 마스터 편집**에서 나중에 보완하면 됩니다."
+        "나머지(리드타임·MOQ·유통기한 등)는 없으면 기본값이 들어가고, **③ 데이터 연동 → 마스터 편집**에서 나중에 보완하면 됩니다."
     )
 
     st.markdown(f"**현재 로드된 품목 ({len(skus)}건)**")
@@ -941,7 +1093,7 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
                 st.success("; ".join(report.messages) + persist_result_message(saved))
                 if st.session_state.imported_sales:
                     st.info(
-                        f"④ 수요 예측 탭에 출고 데이터 {len(st.session_state.imported_sales)}건 연동됨"
+                        f"② 수요·프로모션 탭에 출고 데이터 {len(st.session_state.imported_sales)}건 연동됨"
                     )
                 for w in report.warnings[:5]:
                     st.warning(w)
@@ -953,7 +1105,7 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
         st.markdown("**② 주간 출고 데이터 가져오기 (선택)**")
         st.caption(
             "영림원 **2.xlsx**는 왼쪽 재고 업로드만으로 충분합니다(출고계→일평균출고). "
-            "여기는 ④ 수요 예측용 **주간 출고 이력** 또는 같은 재고현황 파일을 넣을 때 사용합니다."
+            "여기는 ② 수요·프로모션용 **주간 출고 이력** 또는 같은 재고현황 파일을 넣을 때 사용합니다."
         )
         sample_path = _SAMPLES_DIR / "erp_weekly_shipment.sample.csv"
         if sample_path.is_file():
@@ -992,7 +1144,7 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
                     _reset_file_uploader("erp_ship")
                     saved = _save_session()
                     st.success("; ".join(report.messages) + persist_result_message(saved))
-                    st.info("④ 수요 예측 탭에서 이 데이터를 사용합니다.")
+                    st.info("② 수요·프로모션 탭에서 이 데이터를 사용합니다.")
                 else:
                     st.error("; ".join(report.messages))
                 for warning in report.warnings[:5]:
@@ -1081,7 +1233,6 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
 
 
 def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
-    st.subheader("수요 추이 · 간단 예측")
     st.caption(
         "주간 이력 2주 이상이면 **다음주 예측 = 최근주 + 주간 변화량 평균** · "
         "마스터/영림원 기간 1건이면 **주·월 평균**만 표시(추이 없음)"
@@ -1092,11 +1243,11 @@ def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
     if st.session_state.get("imported_sales"):
         st.success(
             f"출고·수요 데이터 {len(st.session_state.imported_sales)}건 사용 "
-            "(⑦ 마스터 편집·ERP 연동과 연동됨)"
+            "(③ 데이터 연동과 연동됨)"
         )
     elif master_sales:
         st.success(
-            f"⑦ 마스터 편집 일평균출고 {len(master_sales)}건을 주간 수요로 환산해 사용합니다."
+            f"③ 마스터 편집 일평균출고 {len(master_sales)}건을 주간 수요로 환산해 사용합니다."
         )
 
     st.download_button(
@@ -1266,42 +1417,14 @@ def _collect_expiry_threshold_inputs() -> tuple[dict[str, tuple[float, float]] |
     return thresholds, []
 
 
-def tab_expiry(skus: list[SkuMaster]) -> None:
-    _render_expiry(skus)
+def _render_expiry_details(
+    skus: list[SkuMaster],
+    thresholds: dict[str, tuple[float, float]],
+    alerts: list[ExpiryAlert] | None = None,
+) -> None:
+    if alerts is None:
+        alerts = build_expiry_lot_alerts(skus, thresholds_by_category=thresholds)
 
-
-@st.fragment
-def _render_expiry(skus: list[SkuMaster]) -> None:
-    st.subheader("유통기한 관리")
-    st.caption("WMS LOT별 유통기한·수량 — FEFO 출고 · 카테고리별 임박/주의 알림")
-
-    if "expiry_thresholds" not in st.session_state:
-        st.session_state.expiry_thresholds = _default_expiry_thresholds()
-    if "expiry_settings_rev" not in st.session_state:
-        st.session_state.expiry_settings_rev = 0
-
-    with st.expander("카테고리별 임박·주의 기준", expanded=True):
-        draft_thresholds, draft_errors = _collect_expiry_threshold_inputs()
-        t1, t2 = st.columns([1, 3])
-        with t1:
-            apply_thresholds = st.button("기준 적용", type="primary", use_container_width=True)
-        with t2:
-            reset_thresholds = st.button("기본값 복원", use_container_width=True)
-        if reset_thresholds:
-            st.session_state.expiry_thresholds = _default_expiry_thresholds()
-            st.session_state.expiry_settings_rev += 1
-            st.rerun()
-        if apply_thresholds:
-            if draft_errors:
-                for msg in draft_errors[:5]:
-                    st.error(msg)
-            elif draft_thresholds:
-                st.session_state.expiry_thresholds = draft_thresholds
-                st.success("카테고리별 기준을 저장했습니다.")
-
-    thresholds = draft_thresholds if draft_thresholds else st.session_state.expiry_thresholds
-
-    alerts = build_expiry_lot_alerts(skus, thresholds_by_category=thresholds)
     lot_rows = sum(len(s.expiry_lots) for s in skus)
     tracked_skus = len({alert.sku_id for alert in alerts})
     without_expiry = len(skus) - tracked_skus
@@ -1317,8 +1440,8 @@ def _render_expiry(skus: list[SkuMaster]) -> None:
 
     if not alerts:
         st.info(
-            "유통기한이 등록된 SKU가 없습니다. **⑤ ERP 연동 → ③ WMS 유통기한** "
-            "또는 **⑦ 마스터 편집**에서 입력하세요."
+            "유통기한이 등록된 SKU가 없습니다. **③ 데이터 연동 → WMS 유통기한** "
+            "또는 **마스터 편집**에서 입력하세요."
         )
         return
 
@@ -1395,21 +1518,50 @@ def _render_expiry(skus: list[SkuMaster]) -> None:
             )
 
 
+def tab_expiry(skus: list[SkuMaster]) -> None:
+    _render_expiry(skus)
+
+
+@st.fragment
+def _render_expiry(skus: list[SkuMaster]) -> None:
+    st.subheader("유통기한 관리")
+    st.caption("WMS LOT별 유통기한·수량 — FEFO 출고 · 카테고리별 임박/주의 알림")
+
+    if "expiry_thresholds" not in st.session_state:
+        st.session_state.expiry_thresholds = _default_expiry_thresholds()
+    if "expiry_settings_rev" not in st.session_state:
+        st.session_state.expiry_settings_rev = 0
+
+    with st.expander("카테고리별 임박·주의 기준", expanded=True):
+        draft_thresholds, draft_errors = _collect_expiry_threshold_inputs()
+        t1, t2 = st.columns([1, 3])
+        with t1:
+            apply_thresholds = st.button("기준 적용", type="primary", use_container_width=True)
+        with t2:
+            reset_thresholds = st.button("기본값 복원", use_container_width=True)
+        if reset_thresholds:
+            st.session_state.expiry_thresholds = _default_expiry_thresholds()
+            st.session_state.expiry_settings_rev += 1
+            st.rerun()
+        if apply_thresholds:
+            if draft_errors:
+                for msg in draft_errors[:5]:
+                    st.error(msg)
+            elif draft_thresholds:
+                st.session_state.expiry_thresholds = draft_thresholds
+                st.success("카테고리별 기준을 저장했습니다.")
+
+    thresholds = draft_thresholds if draft_thresholds else st.session_state.expiry_thresholds
+    _render_expiry_details(skus, thresholds)
+
+
 def _render_active_tab(active_tab: str, skus: list[SkuMaster], target_days: float) -> None:
     if active_tab == TAB_OPTIONS[0]:
-        tab_stockout_board(skus, target_days)
+        tab_operations_hub(skus, target_days)
     elif active_tab == TAB_OPTIONS[1]:
-        tab_reorder(skus, target_days)
+        tab_analysis(skus, target_days)
     elif active_tab == TAB_OPTIONS[2]:
-        tab_promo(skus)
-    elif active_tab == TAB_OPTIONS[3]:
-        tab_forecast(skus, target_days)
-    elif active_tab == TAB_OPTIONS[4]:
-        tab_erp_import(skus)
-    elif active_tab == TAB_OPTIONS[5]:
-        tab_expiry(skus)
-    elif active_tab == TAB_OPTIONS[6]:
-        tab_master_edit(_sku_list())
+        tab_data(skus)
 
 
 def main() -> None:
@@ -1429,7 +1581,7 @@ def main() -> None:
     st.title("📊 Instock CT")
     st.caption(
         "의료 B2B 클리닉몰 · 재고관리 매니저용 시범 — "
-        "결품 위험 · MOQ/리드타임 발주 · 프로모션 · 수요 예측 · 유통기한 · 마스터 편집"
+        "재고·발주·유통기한 · 수요·프로모션 · ERP/WMS 데이터 연동"
     )
 
     active_tab = st.selectbox(
