@@ -488,12 +488,17 @@ def sales_from_sku_masters(
     week_label: str | None = None,
     period_days: float = 30.0,
     period_end_date: str | None = None,
+    period_start_date: str | None = None,
 ) -> list[WeeklySales]:
     """Build weekly-equivalent sales rows from master avg_daily_demand."""
     label = week_label
     if label is None:
-        if period_end_date:
-            label = format_younglimwon_period_label(period_days, period_end_date)
+        if period_end_date or period_start_date:
+            label = format_younglimwon_period_label(
+                period_days,
+                period_end_date,
+                period_start_date,
+            )
         else:
             label = "마스터(일평균환산)"
     sales: list[WeeklySales] = []
@@ -518,6 +523,7 @@ def sync_sales_from_inventory(
     min_outbound: float = 0.0,
     period_days: float = 30.0,
     period_end_date: str | None = None,
+    period_start_date: str | None = None,
 ) -> list[WeeklySales]:
     """Derive forecast sales from upload file, falling back to master daily demand."""
     sales, report = parse_sales_upload(
@@ -526,6 +532,7 @@ def sync_sales_from_inventory(
         min_outbound=min_outbound,
         period_days=period_days,
         period_end_date=period_end_date,
+        period_start_date=period_start_date,
     )
     if report.ok and sales:
         return sales
@@ -533,6 +540,7 @@ def sync_sales_from_inventory(
         skus,
         period_days=period_days,
         period_end_date=period_end_date,
+        period_start_date=period_start_date,
     )
 
 
@@ -742,12 +750,15 @@ def parse_sales_csv(
 def format_younglimwon_period_label(
     period_days: float,
     period_end_date: str | None = None,
+    period_start_date: str | None = None,
 ) -> str:
     period = max(1, int(round(float(period_days))))
-    if period_end_date:
-        end = str(period_end_date).strip()[:10]
-        if end:
-            return f"{end} ({period}일 합계)"
+    start = str(period_start_date).strip()[:10] if period_start_date else ""
+    end = str(period_end_date).strip()[:10] if period_end_date else ""
+    if start and end:
+        return f"{start}~{end} ({period}일)"
+    if end:
+        return f"{end} ({period}일 합계)"
     return f"기간합계({period}일)"
 
 
@@ -757,6 +768,7 @@ def parse_younglimwon_aggregated_sales(
     min_outbound: float = 0.0,
     period_days: float = 30.0,
     period_end_date: str | None = None,
+    period_start_date: str | None = None,
 ) -> tuple[list[WeeklySales], ImportReport]:
     """Convert 영림원 재고현황(출고계) into weekly-equivalent shipment rows."""
     df = _normalize_columns(frame)
@@ -782,7 +794,11 @@ def parse_younglimwon_aggregated_sales(
         work = work[work[outbound_col] >= min_outbound].copy()
 
     period = max(1.0, float(period_days))
-    week_start = format_younglimwon_period_label(period, period_end_date)
+    week_start = format_younglimwon_period_label(
+        period,
+        period_end_date,
+        period_start_date,
+    )
     sales: list[WeeklySales] = []
     for _, row in work.iterrows():
         sku_id = str(row["품목번호"]).strip()
@@ -816,6 +832,7 @@ def parse_sales_upload(
     min_outbound: float = 0.0,
     period_days: float = 30.0,
     period_end_date: str | None = None,
+    period_start_date: str | None = None,
 ) -> tuple[list[WeeklySales], ImportReport]:
     """Parse weekly shipment CSV or 영림원 aggregated outbound exports."""
     frame = _normalize_columns(frame)
@@ -830,6 +847,7 @@ def parse_sales_upload(
             min_outbound=min_outbound,
             period_days=period_days,
             period_end_date=period_end_date,
+            period_start_date=period_start_date,
         )
 
     if is_inventory_export_frame(frame):

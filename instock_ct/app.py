@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import copy
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -54,6 +54,7 @@ from instock_ct.erp_import import (  # noqa: E402
     build_minimal_erp_sku_csv_bytes,
     build_sample_wms_expiry_csv_bytes,
     coerce_float,
+    format_younglimwon_period_label,
     is_korean_sales_frame,
     merge_sku_masters,
     parse_inventory_upload,
@@ -142,8 +143,7 @@ def _render_product_name(name: str) -> None:
     )
 
 
-def _younglimwon_period_end_iso() -> str | None:
-    value = st.session_state.get("ylw_period_end_date")
+def _date_to_iso(value: object | None) -> str | None:
     if value is None:
         return None
     if hasattr(value, "isoformat"):
@@ -152,15 +152,52 @@ def _younglimwon_period_end_iso() -> str | None:
     return text[:10] if text else None
 
 
-def _render_younglimwon_aggregate_settings(*, show_min_outbound: bool = True) -> tuple[float, float]:
-    """Shared 영림원 출고계 controls when export files have no date column."""
+def _younglimwon_period_start_iso() -> str | None:
+    return _date_to_iso(st.session_state.get("ylw_period_start_date"))
+
+
+def _younglimwon_period_end_iso() -> str | None:
+    return _date_to_iso(st.session_state.get("ylw_period_end_date"))
+
+
+def _younglimwon_period_days() -> float:
+    start = st.session_state.get("ylw_period_start_date")
+    end = st.session_state.get("ylw_period_end_date")
+    if start is not None and end is not None:
+        try:
+            return float(max(1, (end - start).days + 1))
+        except TypeError:
+            pass
+    return float(st.session_state.get("ylw_period_days", 30.0))
+
+
+def _younglimwon_period_label() -> str:
+    return format_younglimwon_period_label(
+        _younglimwon_period_days(),
+        _younglimwon_period_end_iso(),
+        _younglimwon_period_start_iso(),
+    )
+
+
+def _render_younglimwon_date_range(
+    *,
+    show_min_outbound: bool = True,
+    title: str | None = None,
+) -> tuple[float, float]:
+    """Shared 출고계 date range when export files have no date column."""
+    if title:
+        st.markdown(title)
+    default_end = date.today()
+    default_start = default_end - timedelta(days=29)
+
     if show_min_outbound:
-        c1, c2, c3 = st.columns(3)
+        c0, c1, c2 = st.columns(3)
     else:
-        c1 = None
-        c2, c3 = st.columns(2)
-    if c1 is not None:
-        with c1:
+        c0 = None
+        c1, c2 = st.columns(2)
+
+    if c0 is not None:
+        with c0:
             min_out = st.number_input(
                 "출고계 최소 (이상만)",
                 min_value=0.0,
@@ -171,24 +208,33 @@ def _render_younglimwon_aggregate_settings(*, show_min_outbound: bool = True) ->
             )
     else:
         min_out = float(st.session_state.get("ylw_min_outbound", 10.0))
+
+    with c1:
+        st.date_input(
+            "집계 시작일",
+            value=default_start,
+            help="출고계 집계 구간 시작",
+            key="ylw_period_start_date",
+        )
     with c2:
         st.date_input(
             "집계 종료일",
-            value=date.today(),
-            help="재고현황 export 기준일 (파일에 날짜가 없을 때)",
+            value=default_end,
+            help="출고계 집계 구간 종료 (export 기준일)",
             key="ylw_period_end_date",
         )
-    with c3:
-        period = st.number_input(
-            "집계 기간(일)",
-            min_value=1,
-            max_value=365,
-            value=int(st.session_state.get("ylw_period_days", 30)),
-            step=1,
-            help="월간 재고현황이면 30, 주간이면 7",
-            key="ylw_period_days",
-        )
-    return float(min_out), float(period)
+
+    start = st.session_state.get("ylw_period_start_date")
+    end = st.session_state.get("ylw_period_end_date")
+    period_days = _younglimwon_period_days()
+    st.session_state["ylw_period_days"] = int(period_days)
+    if start and end and end < start:
+        st.error("집계 종료일은 시작일과 같거나 이후여야 합니다.")
+    st.caption(
+        f"적용 기간 **{_younglimwon_period_label()}** · "
+        f"일평균출고 = 출고계 ÷ {int(period_days)}"
+    )
+    return float(min_out), period_days
 
 
 RISK_COLORS = {
@@ -508,32 +554,7 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
             format_func=lambda k: MERGE_MODE_LABELS[k],
             key="master_bulk_mode",
         )
-        ylw_c1, ylw_c2, ylw_c3 = st.columns(3)
-        with ylw_c1:
-            master_ylw_min = st.number_input(
-                "영림원: 출고계 최소 (이상만)",
-                min_value=0.0,
-                value=10.0,
-                step=1.0,
-                key="ylw_min_outbound",
-            )
-        with ylw_c2:
-            st.date_input(
-                "영림원: 집계 종료일",
-                value=date.today(),
-                help="재고현황 export 기준일 (파일에 날짜 없을 때)",
-                key="ylw_period_end_date",
-            )
-        with ylw_c3:
-            master_ylw_period = st.number_input(
-                "영림원: 집계 기간(일)",
-                min_value=1,
-                max_value=365,
-                value=30,
-                step=1,
-                help="월간 재고현황이면 30, 주간이면 7",
-                key="ylw_period_days",
-            )
+        ylw_min_out, ylw_period = _render_younglimwon_date_range()
         tpl_c1, tpl_c2 = st.columns(2)
         with tpl_c1:
             st.download_button(
@@ -570,8 +591,8 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
             imported, report = parse_inventory_upload(
                 bulk_file,
                 preset=bulk_preset,
-                min_outbound=float(master_ylw_min),
-                period_days=float(master_ylw_period),
+                min_outbound=float(ylw_min_out),
+                period_days=float(ylw_period),
             )
             if report.ok:
                 merged, stats = merge_sku_masters(skus, imported, mode=bulk_mode)
@@ -580,9 +601,10 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
                     raw,
                     merged,
                     preset=bulk_preset,
-                    min_outbound=float(master_ylw_min),
-                    period_days=float(master_ylw_period),
+                    min_outbound=float(ylw_min_out),
+                    period_days=float(ylw_period),
                     period_end_date=_younglimwon_period_end_iso(),
+                    period_start_date=_younglimwon_period_start_iso(),
                 ) or None
                 _bump_data_editor("master_editor")
                 _reset_file_uploader("master_bulk_inv")
@@ -687,8 +709,9 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
 def _refresh_sales_from_skus(skus: list[SkuMaster]) -> None:
     sales = sales_from_sku_masters(
         skus,
-        period_days=float(st.session_state.get("ylw_period_days", 30.0)),
+        period_days=_younglimwon_period_days(),
         period_end_date=_younglimwon_period_end_iso(),
+        period_start_date=_younglimwon_period_start_iso(),
     )
     st.session_state.imported_sales = sales if sales else None
 
@@ -1152,8 +1175,8 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
                 use_container_width=True,
             )
         st.caption("필수: 품목코드 · 품명 · 현재고 · (권장) 일평균출고")
-        st.caption("영림원 **2.xlsx**처럼 날짜가 없는 파일은 아래 **집계 종료일·기간(일)** 을 맞춰 주세요.")
-        ylw_min_out, ylw_period = _render_younglimwon_aggregate_settings()
+        st.caption("영림원 **2.xlsx**처럼 날짜가 없는 파일은 **집계 시작일~종료일** 을 export 구간에 맞게 지정하세요.")
+        ylw_min_out, ylw_period = _render_younglimwon_date_range()
         inv_file = st.file_uploader(
             "재고 CSV / Excel (.xlsx)",
             type=["csv", "xlsx", "xls"],
@@ -1183,6 +1206,7 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
                     min_outbound=float(ylw_min_out),
                     period_days=float(ylw_period),
                     period_end_date=_younglimwon_period_end_iso(),
+                    period_start_date=_younglimwon_period_start_iso(),
                 ) or None
                 _bump_data_editor("master_editor")
                 _reset_file_uploader("erp_inv")
@@ -1233,6 +1257,7 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
                     min_outbound=float(ylw_min_out),
                     period_days=float(ylw_period),
                     period_end_date=_younglimwon_period_end_iso(),
+                    period_start_date=_younglimwon_period_start_iso(),
                 )
             except Exception as exc:
                 st.error(f"파일을 읽을 수 없습니다: {exc}")
@@ -1365,29 +1390,31 @@ def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
         "마스터/영림원 기간 1건이면 **주·월 평균**만 표시(추이 없음)"
     )
 
-    with st.expander("영림원 출고계 집계 (날짜 없는 파일)", expanded=False):
-        st.caption(
-            "2.xlsx처럼 **날짜 컬럼이 없을 때** 집계 종료일과 기간(일)을 지정합니다. "
-            "③ 데이터 연동과 같은 값을 공유합니다."
-        )
-        _render_younglimwon_aggregate_settings()
+    _render_younglimwon_date_range(
+        show_min_outbound=False,
+        title="**출고계 데이터 기간 (며칠~며칠)**",
+    )
+    period_label = _younglimwon_period_label()
+    period_days = _younglimwon_period_days()
+    period_end = _younglimwon_period_end_iso()
+    period_start = _younglimwon_period_start_iso()
 
     sample_df = pd.DataFrame(weekly_sales_to_dataframe_rows(build_sample_weekly_sales()))
-    period_end = _younglimwon_period_end_iso()
-    period_days = float(st.session_state.get("ylw_period_days", 30.0))
     master_sales = sales_from_sku_masters(
         skus,
         period_days=period_days,
         period_end_date=period_end,
+        period_start_date=period_start,
     )
     if st.session_state.get("imported_sales"):
         st.success(
-            f"출고·수요 데이터 {len(st.session_state.imported_sales)}건 사용 "
-            "(③ 데이터 연동과 연동됨)"
+            f"출고·수요 데이터 {len(st.session_state.imported_sales)}건 · "
+            f"기간 **{period_label}** (③ 데이터 연동)"
         )
     elif master_sales:
         st.success(
-            f"③ 마스터 편집 일평균출고 {len(master_sales)}건을 주간 수요로 환산해 사용합니다."
+            f"마스터 일평균출고 {len(master_sales)}건 · "
+            f"기간 **{period_label}** 로 환산"
         )
 
     st.download_button(
@@ -1439,6 +1466,7 @@ def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
                 min_outbound=float(st.session_state.get("ylw_min_outbound", 10.0)),
                 period_days=period_days,
                 period_end_date=period_end,
+                period_start_date=period_start,
             )
         if not report.ok:
             st.error("; ".join(report.messages))

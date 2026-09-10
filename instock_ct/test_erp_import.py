@@ -174,16 +174,21 @@ class ErpImportTests(unittest.TestCase):
         self.assertAlmostEqual(sales[0].qty, 7.0)
         self.assertEqual(sales[0].week_start, "기간합계(30일)")
 
-    def test_younglimwon_period_end_date_label(self) -> None:
+    def test_younglimwon_period_date_range_label(self) -> None:
         frame = pd.DataFrame([{"품목번호": "A-001", "출고계": 30, "재고수량": 100}])
         sales, report = parse_younglimwon_aggregated_sales(
             frame,
             min_outbound=0,
             period_days=30,
             period_end_date="2026-09-10",
+            period_start_date="2026-08-12",
         )
         self.assertTrue(report.ok)
-        self.assertEqual(sales[0].week_start, "2026-09-10 (30일 합계)")
+        self.assertEqual(sales[0].week_start, "2026-08-12~2026-09-10 (30일)")
+        self.assertEqual(
+            format_younglimwon_period_label(30, "2026-09-10", "2026-08-12"),
+            "2026-08-12~2026-09-10 (30일)",
+        )
         self.assertEqual(
             format_younglimwon_period_label(30, "2026-09-10"),
             "2026-09-10 (30일 합계)",
