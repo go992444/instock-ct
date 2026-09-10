@@ -1232,6 +1232,27 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
     st.caption("같은 SKU에 유통기한이 여러 개면 행을 나눠서 입력 (LOT별 수량)")
 
 
+def _render_weekly_sales_chart(sku_sales: pd.DataFrame) -> None:
+    """Weekly qty trend without Altair (avoids Python 3.13+ TypedDict closed error)."""
+    import matplotlib.pyplot as plt
+
+    plot_df = sku_sales.sort_values("week_start")
+    fig, ax = plt.subplots(figsize=(9, 3.2))
+    ax.plot(
+        plot_df["week_start"].astype(str),
+        plot_df["qty"],
+        marker="o",
+        linewidth=2,
+        color="#1f77b4",
+    )
+    ax.set_ylabel("출고수량")
+    ax.set_xlabel("주 시작일")
+    ax.tick_params(axis="x", rotation=30, labelsize=8)
+    ax.grid(True, alpha=0.25)
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+
+
 def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
     st.caption(
         "주간 이력 2주 이상이면 **다음주 예측 = 최근주 + 주간 변화량 평균** · "
@@ -1365,8 +1386,7 @@ def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
     )
     sku_sales = frame[frame["sku_id"] == pick].sort_values("week_start")
     if not sku_sales.empty:
-        chart = sku_sales.set_index("week_start")[["qty"]]
-        st.line_chart(chart)
+        _render_weekly_sales_chart(sku_sales)
 
 
 def _default_expiry_thresholds() -> dict[str, tuple[float, float]]:
