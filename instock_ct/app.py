@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 _APP_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _APP_DIR.parent
@@ -92,6 +93,53 @@ from instock_ct.models import ExpiryAlert  # noqa: E402
 _SAMPLES_DIR = _APP_DIR / "samples"
 
 st.set_page_config(page_title="Instock CT", page_icon="📊", layout="wide")
+
+
+def _inject_notranslate() -> None:
+    """Discourage browser auto-translate (keeps ERP product names intact)."""
+    st.markdown(
+        """
+        <style>
+        html, body, [data-testid="stAppViewContainer"], [data-testid="stDataFrame"],
+        [data-testid="stSelectbox"], [data-testid="stMetric"], .notranslate {
+            translate: no !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    components.html(
+        """
+        <script>
+        (function () {
+            document.documentElement.setAttribute("translate", "no");
+            document.documentElement.classList.add("notranslate");
+            if (!document.querySelector('meta[name="google"][content="notranslate"]')) {
+                const meta = document.createElement("meta");
+                meta.name = "google";
+                meta.content = "notranslate";
+                document.head.appendChild(meta);
+            }
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def _render_product_name(name: str) -> None:
+    safe = (
+        name.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+    st.markdown(
+        f'<p class="notranslate" translate="no"><strong>품명</strong> {safe}</p>',
+        unsafe_allow_html=True,
+    )
+
 
 RISK_COLORS = {
     "critical": "🔴",
@@ -1233,24 +1281,32 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
 
 
 def _render_weekly_sales_chart(sku_sales: pd.DataFrame) -> None:
-    """Weekly qty trend without Altair (avoids Python 3.13+ TypedDict closed error)."""
-    import matplotlib.pyplot as plt
+    """Weekly qty trend via Plotly (browser fonts, no matplotlib CJK issue)."""
+    import plotly.express as px
 
-    plot_df = sku_sales.sort_values("week_start")
-    fig, ax = plt.subplots(figsize=(9, 3.2))
-    ax.plot(
-        plot_df["week_start"].astype(str),
-        plot_df["qty"],
-        marker="o",
-        linewidth=2,
-        color="#1f77b4",
+    plot_df = sku_sales.sort_values("week_start").copy()
+    plot_df["week_start"] = plot_df["week_start"].astype(str)
+
+    if len(plot_df) == 1:
+        row = plot_df.iloc[0]
+        st.metric("해당 주 출고량", f"{row['qty']:,.0f}", help=str(row["week_start"]))
+        st.caption("주간 이력 2주 이상이면 추이 그래프가 표시됩니다.")
+        return
+
+    fig = px.line(
+        plot_df,
+        x="week_start",
+        y="qty",
+        markers=True,
+        labels={"week_start": "주 시작일", "qty": "출고수량"},
     )
-    ax.set_ylabel("출고수량")
-    ax.set_xlabel("주 시작일")
-    ax.tick_params(axis="x", rotation=30, labelsize=8)
-    ax.grid(True, alpha=0.25)
-    fig.tight_layout()
-    st.pyplot(fig, clear_figure=True)
+    fig.update_traces(line=dict(width=2, color="#2563eb"), marker=dict(size=7))
+    fig.update_layout(
+        height=320,
+        margin=dict(l=20, r=20, t=10, b=40),
+        yaxis=dict(rangemode="tozero"),
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
@@ -1382,8 +1438,10 @@ def tab_forecast(skus: list[SkuMaster], target_days: float) -> None:
     pick = st.selectbox(
         "품목별 출고 추이",
         [f.sku_id for f in forecasts[:15]],
-        format_func=lambda sid: f"{sid} — {names.get(sid, sid)}",
+        format_func=lambda sid: sid,
+        key="forecast_trend_sku",
     )
+    _render_product_name(names.get(pick, pick))
     sku_sales = frame[frame["sku_id"] == pick].sort_values("week_start")
     if not sku_sales.empty:
         _render_weekly_sales_chart(sku_sales)
@@ -1585,6 +1643,7 @@ def _render_active_tab(active_tab: str, skus: list[SkuMaster], target_days: floa
 
 
 def main() -> None:
+    _inject_notranslate()
     ensure_session_restored()
     _init_state()
     if st.session_state.pop("_browser_storage_corrupt", False):
