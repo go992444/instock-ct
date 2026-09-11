@@ -1523,21 +1523,9 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
     )
 
     with tab_inv:
-        st.markdown("**영림원 2.xlsx** 또는 ERP 재고 파일 → 품목·현재고·일평균출고 반영")
+        st.markdown("**영림원 2.xlsx** → 품목·현재고·일평균출고 반영")
         st.markdown("##### 1. 데이터 기간 등록 (업로드 전 · 필수)")
         ylw_min_out, ylw_period, period_ok = _render_inventory_file_period_registration()
-        if _has_younglimwon_outbound_source():
-            st.markdown("**출고계 → 일평균출고 검증 (상위 10건)**")
-            _render_outbound_calc_panel(
-                period_days=ylw_period,
-                period_label=_younglimwon_period_label(),
-                raw_frame=_younglimwon_source_frame(),
-                outbound_totals=_younglimwon_outbound_totals() or None,
-                min_outbound=float(ylw_min_out),
-                wrap_expander=False,
-            )
-            _sync_younglimwon_demand_if_needed()
-            st.caption("등록 기간을 바꾸면 **일평균출고가 자동 반영**됩니다.")
         st.markdown("##### 2. 재고 파일 업로드")
         st.caption("위에 등록한 기간과 **같은 export**일 때만 올려 주세요.")
         inv_file = st.file_uploader(
@@ -1608,6 +1596,25 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
                 st.rerun()
             else:
                 st.error("; ".join(report.messages))
+
+        if _has_younglimwon_outbound_source():
+            _sync_younglimwon_demand_if_needed()
+            with st.expander(
+                f"계산 확인 · 마지막 가져오기 ({_younglimwon_period_label()})",
+                expanded=False,
+            ):
+                st.caption(
+                    "**이 표만** 출고계÷기간 계산 샘플(상위 10건)입니다. "
+                    "전체 결과는 **① 재고·발주·유통기한** 탭에서 보세요."
+                )
+                _render_outbound_calc_panel(
+                    period_days=ylw_period,
+                    period_label=_younglimwon_period_label(),
+                    raw_frame=_younglimwon_source_frame(),
+                    outbound_totals=_younglimwon_outbound_totals() or None,
+                    min_outbound=float(ylw_min_out),
+                    wrap_expander=False,
+                )
 
     with tab_wms:
         st.markdown("**WMS export** → SKU별 유통기한·LOT 수량 (영림원 파일에는 없음)")
@@ -1716,17 +1723,6 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
                     st.error("; ".join(report.messages))
                 for warning in report.warnings[:5]:
                     st.warning(warning)
-
-    st.markdown(f"**현재 마스터 미리보기 ({len(skus)}건)**")
-    if skus:
-        st.dataframe(
-            _skus_to_edit_frame(skus),
-            hide_index=True,
-            use_container_width=True,
-            height=280,
-        )
-    else:
-        st.info("아직 SKU가 없습니다. ① 재고 가져오기부터 진행하세요.")
 
 
 def _render_weekly_sales_chart(sku_sales: pd.DataFrame) -> None:
