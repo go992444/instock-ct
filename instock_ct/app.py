@@ -904,100 +904,99 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
     st.info("재고·WMS 파일 업로드는 **「ERP · WMS 가져오기」** 탭에서 하세요. 여기는 표 편집용입니다.")
     st.markdown("---")
 
-    with st.expander("📥 대량 가져오기 (CSV / Excel)", expanded=len(skus) < 30):
-        st.caption(
-            "ERP·영림원·최소 4컬럼 형식을 지원합니다. "
-            "카테고리는 **품목분류2** 값이 우선 반영됩니다. "
-            "파일 선택 후 **가져오기 실행**을 누르세요. "
-            "가져온 **일평균출고**는 ② 수요·프로모션·① 발주에 자동 연동됩니다."
-        )
-        bulk_preset = st.radio(
-            "파일 형식",
-            options=list(PRESET_LABELS.keys()),
-            format_func=lambda k: PRESET_LABELS[k],
-            horizontal=True,
-            key="master_bulk_preset",
-        )
-        bulk_mode = st.selectbox(
-            "가져오기 방식",
-            options=list(MERGE_MODE_LABELS.keys()),
-            format_func=lambda k: MERGE_MODE_LABELS[k],
-            key="master_bulk_mode",
-        )
-        ylw_min_out, ylw_period = _render_younglimwon_outbound_tools(skus, compact=True)
-        tpl_c1, tpl_c2 = st.columns(2)
-        with tpl_c1:
-            st.download_button(
-                "최소 템플릿 (4컬럼)",
-                build_minimal_erp_sku_csv_bytes(),
-                file_name="erp_inventory_minimal.csv",
-                mime="text/csv",
-                use_container_width=True,
-                key="master_bulk_tpl_min",
-            )
-        with tpl_c2:
-            st.download_button(
-                "전체 샘플 CSV",
-                build_sample_erp_sku_csv_bytes(),
-                file_name="erp_inventory_export.sample.csv",
-                mime="text/csv",
-                use_container_width=True,
-                key="master_bulk_tpl_sample",
-            )
-        bulk_file = st.file_uploader(
-            "재고 CSV / Excel (.xlsx)",
-            type=["csv", "xlsx", "xls"],
-            key=_file_uploader_key("master_bulk_inv"),
-        )
-        run_bulk_import = st.button(
-            "가져오기 실행",
-            type="primary",
+    st.markdown("**📥 대량 가져오기 (CSV / Excel)**")
+    st.caption(
+        "ERP·영림원·최소 4컬럼 형식을 지원합니다. "
+        "카테고리는 **품목분류2** 값이 우선 반영됩니다."
+    )
+    bulk_preset = st.radio(
+        "파일 형식",
+        options=list(PRESET_LABELS.keys()),
+        format_func=lambda k: PRESET_LABELS[k],
+        horizontal=True,
+        key="master_bulk_preset",
+    )
+    bulk_mode = st.selectbox(
+        "가져오기 방식",
+        options=list(MERGE_MODE_LABELS.keys()),
+        format_func=lambda k: MERGE_MODE_LABELS[k],
+        key="master_bulk_mode",
+    )
+    ylw_min_out, ylw_period = _render_younglimwon_date_range()
+    tpl_c1, tpl_c2 = st.columns(2)
+    with tpl_c1:
+        st.download_button(
+            "최소 템플릿 (4컬럼)",
+            build_minimal_erp_sku_csv_bytes(),
+            file_name="erp_inventory_minimal.csv",
+            mime="text/csv",
             use_container_width=True,
-            key="master_bulk_run",
-            disabled=bulk_file is None,
+            key="master_bulk_tpl_min",
         )
-        if run_bulk_import and bulk_file is not None:
-            raw = read_uploaded_table(bulk_file)
-            imported, report = parse_inventory_upload(
-                bulk_file,
+    with tpl_c2:
+        st.download_button(
+            "전체 샘플 CSV",
+            build_sample_erp_sku_csv_bytes(),
+            file_name="erp_inventory_export.sample.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key="master_bulk_tpl_sample",
+        )
+    bulk_file = st.file_uploader(
+        "재고 CSV / Excel (.xlsx)",
+        type=["csv", "xlsx", "xls"],
+        key=_file_uploader_key("master_bulk_inv"),
+    )
+    run_bulk_import = st.button(
+        "가져오기 실행",
+        type="primary",
+        use_container_width=True,
+        key="master_bulk_run",
+        disabled=bulk_file is None,
+    )
+    if run_bulk_import and bulk_file is not None:
+        raw = read_uploaded_table(bulk_file)
+        imported, report = parse_inventory_upload(
+            bulk_file,
+            preset=bulk_preset,
+            min_outbound=float(ylw_min_out),
+            period_days=float(ylw_period),
+        )
+        if report.ok:
+            merged, stats = merge_sku_masters(skus, imported, mode=bulk_mode)
+            st.session_state.skus = merged
+            st.session_state.imported_sales = sync_sales_from_inventory(
+                raw,
+                merged,
                 preset=bulk_preset,
                 min_outbound=float(ylw_min_out),
                 period_days=float(ylw_period),
-            )
-            if report.ok:
-                merged, stats = merge_sku_masters(skus, imported, mode=bulk_mode)
-                st.session_state.skus = merged
-                st.session_state.imported_sales = sync_sales_from_inventory(
-                    raw,
-                    merged,
-                    preset=bulk_preset,
-                    min_outbound=float(ylw_min_out),
-                    period_days=float(ylw_period),
-                    period_end_date=_younglimwon_period_end_iso(),
-                    period_start_date=_younglimwon_period_start_iso(),
-                ) or None
-                _bump_data_editor("master_editor")
-                _reset_file_uploader("master_bulk_inv")
-                parts = [f"파일 {len(imported)}건 처리"]
-                if stats["added"]:
-                    parts.append(f"신규 {stats['added']}건")
-                if stats["updated"]:
-                    parts.append(f"갱신 {stats['updated']}건")
-                if stats["skipped"]:
-                    parts.append(f"건너뜀 {stats['skipped']}건")
-                parts.append(f"총 {stats['total']}건")
-                if st.session_state.imported_sales:
-                    parts.append(f"② 수요·프로모션 {len(st.session_state.imported_sales)}건 연동")
-                saved = _save_session()
-                parts.append(persist_result_message(saved).strip())
-                st.session_state.master_save_flash = " · ".join(parts)
-                _store_younglimwon_source_frame(raw)
-                for warning in report.warnings[:5]:
-                    st.warning(warning)
-                st.rerun()
-            else:
-                st.error("; ".join(report.messages))
+                period_end_date=_younglimwon_period_end_iso(),
+                period_start_date=_younglimwon_period_start_iso(),
+            ) or None
+            _bump_data_editor("master_editor")
+            _reset_file_uploader("master_bulk_inv")
+            parts = [f"파일 {len(imported)}건 처리"]
+            if stats["added"]:
+                parts.append(f"신규 {stats['added']}건")
+            if stats["updated"]:
+                parts.append(f"갱신 {stats['updated']}건")
+            if stats["skipped"]:
+                parts.append(f"건너뜀 {stats['skipped']}건")
+            parts.append(f"총 {stats['total']}건")
+            if st.session_state.imported_sales:
+                parts.append(f"② 수요·프로모션 {len(st.session_state.imported_sales)}건 연동")
+            saved = _save_session()
+            parts.append(persist_result_message(saved).strip())
+            st.session_state.master_save_flash = " · ".join(parts)
+            _store_younglimwon_source_frame(raw)
+            for warning in report.warnings[:5]:
+                st.warning(warning)
+            st.rerun()
+        else:
+            st.error("; ".join(report.messages))
 
+    st.markdown("---")
     st.markdown(f"**현재 품목 {len(skus)}건**")
     if len(skus) > 300:
         st.info("품목이 많으면 표 스크롤·저장에 시간이 걸릴 수 있습니다. 대량 수정은 CSV 가져오기를 권장합니다.")
@@ -1454,10 +1453,16 @@ def tab_analysis(skus: list[SkuMaster], target_days: float) -> None:
 
 def tab_data(skus: list[SkuMaster]) -> None:
     st.subheader("데이터 연동")
-    tab_erp_panel, tab_master_panel = st.tabs(["ERP · WMS 가져오기", "마스터 편집"])
-    with tab_erp_panel:
+    panel = st.radio(
+        "데이터 연동 메뉴",
+        options=["ERP · WMS 가져오기", "마스터 편집"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="data_link_panel",
+    )
+    if panel == "ERP · WMS 가져오기":
         tab_erp_import(skus)
-    with tab_master_panel:
+    else:
         tab_master_edit(_sku_list())
 
 
@@ -1499,20 +1504,11 @@ def tab_promo(skus: list[SkuMaster]) -> None:
 
 
 def tab_erp_import(skus: list[SkuMaster]) -> None:
-    with st.expander("📋 발주용 추천 흐름 (가장 간단)", expanded=True):
-        st.markdown(
-            """
-**매일 발주 (30일 export 1개)**
-
-1. ERP → 재고현황 **최근 30일** export
-2. 아래 **서브탭 「① 재고 가져오기」** → 기간 등록 → 파일 → **재고 가져오기** 버튼
-3. 맨 위 **「① 재고·발주·유통기한」** 탭에서 발주·결품 확인
-
-**선택 — 주간 추세:** 같은 화면 **서브탭 「③ 주간 출고 (선택)」** (별도 파일)
-            """
-        )
-
-    st.caption("**매일:** ① 재고만 · WMS·주간 출고는 필요할 때만")
+    st.info(
+        "**발주용 (매일):** ERP **최근 30일** export → **「① 재고 가져오기」** → "
+        "기간 등록 → 파일 → **재고 가져오기** → **① 재고·발주·유통기한** 탭 확인. "
+        "주간 추세는 **「③ 주간 출고 (선택)」**."
+    )
 
     m1, m2, m3 = st.columns(3)
     m1.metric("로드 SKU", f"{len(skus):,}")
@@ -1530,13 +1526,14 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
         st.markdown("##### 1. 데이터 기간 등록 (업로드 전 · 필수)")
         ylw_min_out, ylw_period, period_ok = _render_inventory_file_period_registration()
         if _has_younglimwon_outbound_source():
+            st.markdown("**출고계 → 일평균출고 검증 (상위 10건)**")
             _render_outbound_calc_panel(
                 period_days=ylw_period,
                 period_label=_younglimwon_period_label(),
                 raw_frame=_younglimwon_source_frame(),
                 outbound_totals=_younglimwon_outbound_totals() or None,
                 min_outbound=float(ylw_min_out),
-                expanded=False,
+                wrap_expander=False,
             )
             _sync_younglimwon_demand_if_needed()
             st.caption("등록 기간을 바꾸면 **일평균출고가 자동 반영**됩니다.")
@@ -1719,16 +1716,16 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
                 for warning in report.warnings[:5]:
                     st.warning(warning)
 
-    with st.expander(f"현재 마스터 미리보기 ({len(skus)}건)", expanded=False):
-        if skus:
-            st.dataframe(
-                _skus_to_edit_frame(skus),
-                hide_index=True,
-                use_container_width=True,
-                height=280,
-            )
-        else:
-            st.info("아직 SKU가 없습니다. ① 재고 가져오기부터 진행하세요.")
+    st.markdown(f"**현재 마스터 미리보기 ({len(skus)}건)**")
+    if skus:
+        st.dataframe(
+            _skus_to_edit_frame(skus),
+            hide_index=True,
+            use_container_width=True,
+            height=280,
+        )
+    else:
+        st.info("아직 SKU가 없습니다. ① 재고 가져오기부터 진행하세요.")
 
 
 def _render_weekly_sales_chart(sku_sales: pd.DataFrame) -> None:
