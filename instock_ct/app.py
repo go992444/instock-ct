@@ -9,6 +9,8 @@ Instock CT — 의료 B2B 이커머스 발주·재고 관리 시범 (Portfolio)
 
 from __future__ import annotations
 
+APP_BUILD = "9ff0cab2"
+
 import copy
 import sys
 from datetime import date, timedelta
@@ -701,6 +703,7 @@ def _render_sidebar() -> tuple[float, str | None]:
     st.sidebar.header("Instock CT")
     st.sidebar.caption("Medi Market형 B2B 의료 소모품 · 발주·재고 시범")
     st.sidebar.caption("📌 **③ 데이터 연동** — ERP·WMS 업로드 · 마스터 편집")
+    st.sidebar.caption(f"빌드 `{APP_BUILD}` — 미리보기 표 제거됨")
     target_days = st.sidebar.slider(
         "목표 재고 유지일",
         7,
@@ -2160,7 +2163,7 @@ def main() -> None:
     st.markdown("---")
     st.caption(
         "포트폴리오 시범 · 가상 Medi Market 데이터 · "
-        "Python/Streamlit 개발 (AI 보조 워크플로)"
+        f"Python/Streamlit · 빌드 {APP_BUILD}"
     )
 
 
