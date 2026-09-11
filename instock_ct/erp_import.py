@@ -547,6 +547,51 @@ def sync_sales_from_inventory(
     )
 
 
+def _younglimwon_outbound_column(df: pd.DataFrame) -> str | None:
+    for candidate in ("출고계", "판매출고", "출고"):
+        if candidate in df.columns:
+            return candidate
+    return None
+
+
+def younglimwon_outbound_and_stock_maps(
+    frame: pd.DataFrame,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Map 품목번호 → (출고계, 재고수량) for every row, including zeros."""
+    df = _normalize_columns(frame)
+    outbound_col = _younglimwon_outbound_column(df)
+    if "품목번호" not in df.columns or outbound_col is None:
+        return {}, {}
+
+    work = df[df["품목번호"].notna()].copy()
+    work["품목번호"] = work["품목번호"].astype(str).str.strip()
+    work = work[~work["품목번호"].str.upper().eq("TOTAL")]
+    work[outbound_col] = pd.to_numeric(work[outbound_col], errors="coerce").fillna(0.0)
+    work["재고수량"] = pd.to_numeric(work.get("재고수량"), errors="coerce").fillna(0.0)
+
+    outbound = {
+        str(row["품목번호"]): float(row[outbound_col])
+        for _, row in work.iterrows()
+    }
+    stock = {
+        str(row["품목번호"]): float(row["재고수량"])
+        for _, row in work.iterrows()
+    }
+    return outbound, stock
+
+
+def avg_daily_from_outbound(
+    outbound: float,
+    *,
+    period_days: float,
+    min_outbound: float = 0.0,
+) -> float:
+    if outbound < min_outbound:
+        return 0.0
+    period = max(1.0, float(period_days))
+    return round(float(outbound) / period, 2)
+
+
 def prepare_younglimwon_inventory(
     frame: pd.DataFrame,
     *,
@@ -563,12 +608,15 @@ def prepare_younglimwon_inventory(
     work = work[~work["품목번호"].str.upper().eq("TOTAL")]
 
     work["출고계"] = pd.to_numeric(work.get("출고계"), errors="coerce").fillna(0.0)
-    if min_outbound > 0:
-        work = work[work["출고계"] >= min_outbound].copy()
-
     work["재고수량"] = pd.to_numeric(work.get("재고수량"), errors="coerce").fillna(0.0)
     period = max(1.0, float(period_days))
-    avg_daily = (work["출고계"] / period).round(2)
+    avg_daily = work["출고계"].apply(
+        lambda qty: avg_daily_from_outbound(
+            float(qty),
+            period_days=period,
+            min_outbound=min_outbound,
+        )
+    )
 
     work = _inject_category_column(work)
     category = work.get("카테고리", pd.Series(["일반 소모품"] * len(work), index=work.index))
@@ -593,26 +641,8 @@ def prepare_younglimwon_inventory(
 
 def extract_younglimwon_outbound_totals(frame: pd.DataFrame) -> dict[str, float]:
     """Map 품목번호 → 출고계 for period recalc without keeping the full export."""
-    df = _normalize_columns(frame)
-    if "품목번호" not in df.columns:
-        return {}
-    outbound_col = None
-    for candidate in ("출고계", "판매출고", "출고"):
-        if candidate in df.columns:
-            outbound_col = candidate
-            break
-    if outbound_col is None:
-        return {}
-
-    work = df[df["품목번호"].notna()].copy()
-    work["품목번호"] = work["품목번호"].astype(str).str.strip()
-    work = work[~work["품목번호"].str.upper().eq("TOTAL")]
-    work[outbound_col] = pd.to_numeric(work[outbound_col], errors="coerce").fillna(0.0)
-    return {
-        str(row["품목번호"]): float(row[outbound_col])
-        for _, row in work.iterrows()
-        if float(row[outbound_col]) > 0
-    }
+    outbound, _stock = younglimwon_outbound_and_stock_maps(frame)
+    return outbound
 
 
 def build_younglimwon_outbound_preview(

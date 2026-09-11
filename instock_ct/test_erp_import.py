@@ -87,12 +87,11 @@ class ErpImportTests(unittest.TestCase):
         )
         skus, report = parse_younglimwon_inventory(frame, min_outbound=10, period_days=30)
         self.assertTrue(report.ok)
-        self.assertEqual(len(skus), 1)
-        self.assertEqual(skus[0].sku_id, "A-001")
-        self.assertAlmostEqual(skus[0].avg_daily_demand, 1.0)
-        self.assertEqual(skus[0].on_hand, 100.0)
-        self.assertEqual(skus[0].category_label, "소모품")
-        self.assertEqual(skus[0].category, "general")
+        self.assertEqual(len(skus), 2)
+        by_id = {sku.sku_id: sku for sku in skus}
+        self.assertAlmostEqual(by_id["A-001"].avg_daily_demand, 1.0)
+        self.assertAlmostEqual(by_id["B-002"].avg_daily_demand, 0.0)
+        self.assertEqual(by_id["A-001"].on_hand, 100.0)
 
     def test_category_prefers_item_class2(self) -> None:
         frame = pd.DataFrame(
@@ -362,15 +361,33 @@ class ErpImportTests(unittest.TestCase):
         self.assertEqual(len(preview), 2)
         self.assertEqual(float(preview.iloc[0]["일평균출고"]), 10.0)
 
+    def test_zero_outbound_sets_zero_avg_daily(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {
+                    "품목번호": "AHFFP9297/24",
+                    "품명": "테스트",
+                    "출고계": 0,
+                    "재고수량": 22,
+                }
+            ]
+        )
+        skus, report = parse_younglimwon_inventory(frame, min_outbound=10, period_days=30)
+        self.assertTrue(report.ok)
+        self.assertEqual(len(skus), 1)
+        self.assertEqual(skus[0].avg_daily_demand, 0.0)
+        self.assertEqual(skus[0].on_hand, 22.0)
+
     def test_extract_younglimwon_outbound_totals(self) -> None:
         frame = pd.DataFrame(
             [
                 {"품목번호": "ENP00001", "출고계": 300, "재고수량": 10},
-                {"품목번호": "TOTAL", "출고계": 300, "재고수량": 10},
+                {"품목번호": "ENP00002", "출고계": 0, "재고수량": 5},
+                {"품목번호": "TOTAL", "출고계": 300, "재고수량": 15},
             ]
         )
         totals = extract_younglimwon_outbound_totals(frame)
-        self.assertEqual(totals, {"ENP00001": 300.0})
+        self.assertEqual(totals, {"ENP00001": 300.0, "ENP00002": 0.0})
 
 
 if __name__ == "__main__":

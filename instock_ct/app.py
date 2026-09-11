@@ -56,8 +56,10 @@ from instock_ct.erp_import import (  # noqa: E402
     build_sample_wms_expiry_csv_bytes,
     build_younglimwon_outbound_preview,
     coerce_float,
+    avg_daily_from_outbound,
     extract_younglimwon_outbound_totals,
     format_younglimwon_period_label,
+    younglimwon_outbound_and_stock_maps,
     is_korean_sales_frame,
     merge_sku_masters,
     parse_inventory_upload,
@@ -249,23 +251,23 @@ def _reapply_younglimwon_demand(
 ) -> list[SkuMaster]:
     raw = _younglimwon_source_frame()
     if raw is not None:
-        imported, report = parse_younglimwon_inventory(
-            raw,
-            min_outbound=min_outbound,
-            period_days=period_days,
-        )
-        if not report.ok or not imported:
+        outbound_map, stock_map = younglimwon_outbound_and_stock_maps(raw)
+        if not outbound_map:
             return skus
-        by_id = {sku.sku_id: sku for sku in imported}
         updated: list[SkuMaster] = []
         for sku in skus:
-            fresh = by_id.get(sku.sku_id)
-            if fresh is None:
+            if sku.sku_id not in outbound_map:
                 updated.append(copy.deepcopy(sku))
                 continue
             merged = copy.deepcopy(sku)
-            merged.avg_daily_demand = fresh.avg_daily_demand
-            merged.on_hand = fresh.on_hand
+            outbound = outbound_map[sku.sku_id]
+            merged.avg_daily_demand = avg_daily_from_outbound(
+                outbound,
+                period_days=period_days,
+                min_outbound=min_outbound,
+            )
+            if sku.sku_id in stock_map:
+                merged.on_hand = stock_map[sku.sku_id]
             updated.append(merged)
         return updated
 
@@ -273,18 +275,17 @@ def _reapply_younglimwon_demand(
     if not totals:
         return skus
 
-    period = max(1.0, float(period_days))
     updated: list[SkuMaster] = []
     for sku in skus:
-        outbound = totals.get(sku.sku_id)
-        if outbound is None:
+        if sku.sku_id not in totals:
             updated.append(copy.deepcopy(sku))
             continue
         merged = copy.deepcopy(sku)
-        if outbound < min_outbound:
-            merged.avg_daily_demand = 0.0
-        else:
-            merged.avg_daily_demand = round(outbound / period, 2)
+        merged.avg_daily_demand = avg_daily_from_outbound(
+            totals[sku.sku_id],
+            period_days=period_days,
+            min_outbound=min_outbound,
+        )
         updated.append(merged)
     return updated
 
