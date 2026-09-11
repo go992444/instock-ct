@@ -9,7 +9,7 @@ Instock CT — 의료 B2B 이커머스 발주·재고 관리 시범 (Portfolio)
 
 from __future__ import annotations
 
-APP_BUILD = "9ff0cab2"
+APP_BUILD = "9ff0cab3"
 
 import copy
 import sys
@@ -1602,22 +1602,19 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
 
         if _has_younglimwon_outbound_source():
             _sync_younglimwon_demand_if_needed()
-            with st.expander(
-                f"계산 확인 · 마지막 가져오기 ({_younglimwon_period_label()})",
-                expanded=False,
-            ):
-                st.caption(
-                    "**이 표만** 출고계÷기간 계산 샘플(상위 10건)입니다. "
-                    "전체 결과는 **① 재고·발주·유통기한** 탭에서 보세요."
-                )
-                _render_outbound_calc_panel(
-                    period_days=ylw_period,
-                    period_label=_younglimwon_period_label(),
-                    raw_frame=_younglimwon_source_frame(),
-                    outbound_totals=_younglimwon_outbound_totals() or None,
-                    min_outbound=float(ylw_min_out),
-                    wrap_expander=False,
-                )
+            st.markdown("##### 계산 확인 (출고계 → 일평균출고 · 상위 10건)")
+            st.caption(
+                "마지막 **재고 가져오기** 파일 기준 샘플입니다. "
+                "전체 품목은 **① 재고·발주·유통기한** 탭에서 보세요."
+            )
+            _render_outbound_calc_panel(
+                period_days=ylw_period,
+                period_label=_younglimwon_period_label(),
+                raw_frame=_younglimwon_source_frame(),
+                outbound_totals=_younglimwon_outbound_totals() or None,
+                min_outbound=float(ylw_min_out),
+                wrap_expander=False,
+            )
 
     with tab_wms:
         st.markdown("**WMS export** → SKU별 유통기한·LOT 수량 (영림원 파일에는 없음)")
