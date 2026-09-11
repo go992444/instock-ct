@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import copy
 import sys
-from contextlib import nullcontext
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -392,21 +391,17 @@ def _render_younglimwon_outbound_tools(
     *,
     compact: bool = False,
 ) -> tuple[float, float]:
-    """출고계 period settings — compact mode for ERP import tab."""
-    ctx = (
-        st.expander("출고계 기간 · 일평균출고 (영림원 2.xlsx)", expanded=True)
-        if compact
-        else nullcontext()
+    """출고계 period settings (compact = inline, no nested expanders)."""
+    if compact:
+        st.caption("출고계 기간 · 일평균출고 (영림원 export와 동일하게)")
+        return _render_younglimwon_date_range()
+    st.markdown("### 📅 출고계 기간 · 일평균출고")
+    st.info(
+        "영림원 **출고계** = ERP가 이미 합산한 **기간 출고 합계**입니다. "
+        "파일에 날짜가 없으므로 아래 **집계 시작·종료일**로 export 구간을 맞춰 주세요. "
+        "날짜별 필터가 아니라 **일평균출고 = 출고계 ÷ 기간(일)** 로만 계산합니다."
     )
-    with ctx:
-        if not compact:
-            st.markdown("### 📅 출고계 기간 · 일평균출고")
-        st.info(
-            "영림원 **출고계** = ERP가 이미 합산한 **기간 출고 합계**입니다. "
-            "파일에 날짜가 없으므로 아래 **집계 시작·종료일**로 export 구간을 맞춰 주세요. "
-            "날짜별 필터가 아니라 **일평균출고 = 출고계 ÷ 기간(일)** 로만 계산합니다."
-        )
-        return _render_younglimwon_outbound_body(skus)
+    return _render_younglimwon_outbound_body(skus)
 
 
 def _render_outbound_calc_panel(
@@ -418,8 +413,9 @@ def _render_outbound_calc_panel(
     skus: list[SkuMaster] | None = None,
     min_outbound: float = 0.0,
     expanded: bool = True,
+    wrap_expander: bool = True,
 ) -> None:
-    with st.expander("🔍 출고계 → 일평균출고 검증 (상위 10건)", expanded=expanded):
+    def _body() -> None:
         st.caption(
             f"**{period_label}** · 계산식: **일평균출고 = 출고계 ÷ {int(period_days)}**"
         )
@@ -440,13 +436,19 @@ def _render_outbound_calc_panel(
         elif skus:
             st.caption(
                 "원본 **출고계**가 없어 저장된 일평균출고만 역산 표시합니다. "
-                "정확한 재계산은 ① 재고 파일을 다시 가져오세요."
+                "정확한 재계산은 재고 파일을 다시 가져오세요."
             )
             preview = build_outbound_preview_from_skus(skus, period_days=period_days)
         if preview.empty:
             st.info("검증할 출고계·일평균출고 데이터가 없습니다.")
         else:
             st.dataframe(preview, use_container_width=True, hide_index=True)
+
+    if wrap_expander:
+        with st.expander("🔍 출고계 → 일평균출고 검증 (상위 10건)", expanded=expanded):
+            _body()
+    else:
+        _body()
 
 
 def _preview_from_outbound_totals(
@@ -1497,7 +1499,20 @@ def tab_promo(skus: list[SkuMaster]) -> None:
 
 
 def tab_erp_import(skus: list[SkuMaster]) -> None:
-    st.caption("**매일:** ① 재고 → (있으면) ② WMS 유통기한 · ③ 주간 출고는 거의 불필요")
+    with st.expander("📋 발주용 추천 흐름 (가장 간단)", expanded=True):
+        st.markdown(
+            """
+**매일 발주 (30일 export 1개)**
+
+1. ERP → 재고현황 **최근 30일** export
+2. 아래 **서브탭 「① 재고 가져오기」** → 기간 등록 → 파일 → **재고 가져오기** 버튼
+3. 맨 위 **「① 재고·발주·유통기한」** 탭에서 발주·결품 확인
+
+**선택 — 주간 추세:** 같은 화면 **서브탭 「③ 주간 출고 (선택)」** (별도 파일)
+            """
+        )
+
+    st.caption("**매일:** ① 재고만 · WMS·주간 출고는 필요할 때만")
 
     m1, m2, m3 = st.columns(3)
     m1.metric("로드 SKU", f"{len(skus):,}")
@@ -1512,7 +1527,7 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
 
     with tab_inv:
         st.markdown("**영림원 2.xlsx** 또는 ERP 재고 파일 → 품목·현재고·일평균출고 반영")
-        st.markdown("##### ① 이 파일의 데이터 기간 등록 (필수 · 업로드 전)")
+        st.markdown("##### 1. 데이터 기간 등록 (업로드 전 · 필수)")
         ylw_min_out, ylw_period, period_ok = _render_inventory_file_period_registration()
         if _has_younglimwon_outbound_source():
             _render_outbound_calc_panel(
@@ -1525,7 +1540,7 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
             )
             _sync_younglimwon_demand_if_needed()
             st.caption("등록 기간을 바꾸면 **일평균출고가 자동 반영**됩니다.")
-        st.markdown("##### ② 재고 파일 업로드")
+        st.markdown("##### 2. 재고 파일 업로드")
         st.caption("위에 등록한 기간과 **같은 export**일 때만 올려 주세요.")
         inv_file = st.file_uploader(
             "재고 Excel / CSV",
@@ -1558,7 +1573,7 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
                     mime="text/csv",
                     use_container_width=True,
                 )
-        st.markdown("##### ③ 실행")
+        st.markdown("##### 3. 가져오기 실행")
         if st.button(
             "✅ 재고 가져오기",
             type="primary",
