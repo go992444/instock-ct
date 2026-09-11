@@ -13,6 +13,7 @@ from instock_ct.erp_import import (
     _resolve_category,
     build_younglimwon_outbound_preview,
     apply_expiry_lots_to_skus,
+    extract_younglimwon_outbound_totals,
     format_younglimwon_period_label,
     is_korean_sales_frame,
     merge_sku_masters,
@@ -360,6 +361,16 @@ class ErpImportTests(unittest.TestCase):
         preview = build_younglimwon_outbound_preview(frame, period_days=30, limit=5)
         self.assertEqual(len(preview), 2)
         self.assertEqual(float(preview.iloc[0]["일평균출고"]), 10.0)
+
+    def test_extract_younglimwon_outbound_totals(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {"품목번호": "ENP00001", "출고계": 300, "재고수량": 10},
+                {"품목번호": "TOTAL", "출고계": 300, "재고수량": 10},
+            ]
+        )
+        totals = extract_younglimwon_outbound_totals(frame)
+        self.assertEqual(totals, {"ENP00001": 300.0})
 
 
 if __name__ == "__main__":

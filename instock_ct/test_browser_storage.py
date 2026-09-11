@@ -30,7 +30,7 @@ class BrowserStorageTests(unittest.TestCase):
         sales = [WeeklySales("ENP00001", "기간합계(30일)", 9.8)]
         lots = [ExpiryLot(sku_id="ENP00001", expiry_date="2026-12-01", qty=12.0)]
         raw = snapshot_to_json(skus, sales, lots)
-        restored_skus, restored_sales, restored_lots = parse_snapshot(raw)
+        restored_skus, restored_sales, restored_lots, restored_totals = parse_snapshot(raw)
         self.assertEqual(len(restored_skus), 1)
         self.assertEqual(restored_skus[0].sku_id, "ENP00001")
         self.assertEqual(restored_skus[0].on_hand, -5.0)
@@ -41,6 +41,27 @@ class BrowserStorageTests(unittest.TestCase):
         self.assertIsNotNone(restored_lots)
         assert restored_lots is not None
         self.assertEqual(restored_lots[0].qty, 12.0)
+        self.assertIsNone(restored_totals)
+
+    def test_snapshot_roundtrip_with_younglimwon_totals(self) -> None:
+        skus = [
+            SkuMaster(
+                sku_id="ENP00001",
+                name="테스트",
+                category="endoscopy",
+                category_label="소mo품(내시경)",
+                on_hand=10,
+                avg_daily_demand=1.0,
+                lead_time_days=7,
+                moq=1,
+                vendor="-",
+            )
+        ]
+        totals = {"ENP00001": 30.0}
+        raw = snapshot_to_json(skus, None, None, ylw_outbound_totals=totals)
+        restored_skus, _, _, restored_totals = parse_snapshot(raw)
+        self.assertEqual(len(restored_skus), 1)
+        self.assertEqual(restored_totals, totals)
 
 
 if __name__ == "__main__":

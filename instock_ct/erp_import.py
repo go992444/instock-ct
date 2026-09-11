@@ -591,6 +591,30 @@ def prepare_younglimwon_inventory(
     )
 
 
+def extract_younglimwon_outbound_totals(frame: pd.DataFrame) -> dict[str, float]:
+    """Map 품목번호 → 출고계 for period recalc without keeping the full export."""
+    df = _normalize_columns(frame)
+    if "품목번호" not in df.columns:
+        return {}
+    outbound_col = None
+    for candidate in ("출고계", "판매출고", "출고"):
+        if candidate in df.columns:
+            outbound_col = candidate
+            break
+    if outbound_col is None:
+        return {}
+
+    work = df[df["품목번호"].notna()].copy()
+    work["품목번호"] = work["품목번호"].astype(str).str.strip()
+    work = work[~work["품목번호"].str.upper().eq("TOTAL")]
+    work[outbound_col] = pd.to_numeric(work[outbound_col], errors="coerce").fillna(0.0)
+    return {
+        str(row["품목번호"]): float(row[outbound_col])
+        for _, row in work.iterrows()
+        if float(row[outbound_col]) > 0
+    }
+
+
 def build_younglimwon_outbound_preview(
     frame: pd.DataFrame,
     *,

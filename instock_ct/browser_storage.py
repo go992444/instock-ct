@@ -85,6 +85,8 @@ def build_snapshot(
     skus: list[SkuMaster],
     imported_sales: list[WeeklySales] | None,
     expiry_lots: list[ExpiryLot] | None = None,
+    *,
+    ylw_outbound_totals: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "version": SNAPSHOT_VERSION,
@@ -93,12 +95,16 @@ def build_snapshot(
     }
     if expiry_lots:
         payload["expiry_lots"] = [expiry_lot_to_dict(lot) for lot in expiry_lots]
+    if ylw_outbound_totals:
+        payload["ylw_outbound_totals"] = {
+            str(sku_id): float(qty) for sku_id, qty in ylw_outbound_totals.items()
+        }
     return payload
 
 
 def parse_snapshot(
     raw: str,
-) -> tuple[list[SkuMaster], list[WeeklySales] | None, list[ExpiryLot] | None]:
+) -> tuple[list[SkuMaster], list[WeeklySales] | None, list[ExpiryLot] | None, dict[str, float] | None]:
     payload = json.loads(raw)
     version = payload.get("version", 1)
     if version not in (1, SNAPSHOT_VERSION):
@@ -119,17 +125,36 @@ def parse_snapshot(
             flattened.extend(sku.expiry_lots)
         expiry_lots = flattened or None
 
-    return skus, imported_sales, expiry_lots
+    ylw_outbound_totals: dict[str, float] | None = None
+    totals_raw = payload.get("ylw_outbound_totals")
+    if isinstance(totals_raw, dict):
+        ylw_outbound_totals = {
+            str(sku_id): float(qty)
+            for sku_id, qty in totals_raw.items()
+            if float(qty) > 0
+        } or None
+
+    return skus, imported_sales, expiry_lots, ylw_outbound_totals
 
 
 def snapshot_to_json(
     skus: list[SkuMaster],
     imported_sales: list[WeeklySales] | None,
     expiry_lots: list[ExpiryLot] | None = None,
+    *,
+    ylw_outbound_totals: dict[str, float] | None = None,
 ) -> str:
     if expiry_lots is None:
         flattened: list[ExpiryLot] = []
         for sku in skus:
             flattened.extend(sku.expiry_lots)
         expiry_lots = flattened or None
-    return json.dumps(build_snapshot(skus, imported_sales, expiry_lots), ensure_ascii=False)
+    return json.dumps(
+        build_snapshot(
+            skus,
+            imported_sales,
+            expiry_lots,
+            ylw_outbound_totals=ylw_outbound_totals,
+        ),
+        ensure_ascii=False,
+    )

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import sys
+from contextlib import nullcontext
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -56,6 +57,7 @@ from instock_ct.erp_import import (  # noqa: E402
     build_sample_wms_expiry_csv_bytes,
     build_younglimwon_outbound_preview,
     coerce_float,
+    extract_younglimwon_outbound_totals,
     format_younglimwon_period_label,
     is_korean_sales_frame,
     merge_sku_masters,
@@ -206,31 +208,205 @@ def _render_period_preset_buttons(*, prefix: str) -> None:
         st.rerun()
 
 
-def _render_last_outbound_preview() -> None:
-    last_preview = st.session_state.get("last_outbound_preview")
-    if isinstance(last_preview, pd.DataFrame) and not last_preview.empty:
-        with st.expander("📋 직전 가져오기 — 출고계 계산 결과", expanded=True):
-            st.dataframe(last_preview, use_container_width=True, hide_index=True)
+def _store_younglimwon_source_frame(raw: pd.DataFrame) -> None:
+    if is_younglimwon_inventory_frame(raw):
+        st.session_state.last_younglimwon_frame = raw.copy()
+        totals = extract_younglimwon_outbound_totals(raw)
+        st.session_state.ylw_outbound_totals = totals or None
+        st.session_state.ylw_recalc_sig = _younglimwon_recalc_signature()
 
 
-def _render_younglimwon_outbound_tools(skus: list[SkuMaster]) -> tuple[float, float]:
-    """Always-visible 출고계 period + verification (not hidden in collapsed expanders)."""
-    st.markdown("### 📅 출고계 기간 · 일평균출고 검증")
-    st.caption(
-        "영림원 **2.xlsx** 등 **출고계** 컬럼이 있는 파일에 적용됩니다. "
-        "**일평균출고 = 출고계 ÷ 기간(일)**"
+def _younglimwon_source_frame() -> pd.DataFrame | None:
+    frame = st.session_state.get("last_younglimwon_frame")
+    if isinstance(frame, pd.DataFrame) and not frame.empty:
+        return frame
+    return None
+
+
+def _younglimwon_outbound_totals() -> dict[str, float]:
+    totals = st.session_state.get("ylw_outbound_totals")
+    if isinstance(totals, dict):
+        return {str(k): float(v) for k, v in totals.items()}
+    return {}
+
+
+def _younglimwon_recalc_signature() -> tuple[float, str | None, str | None]:
+    return (
+        round(float(st.session_state.get("ylw_min_outbound", 10.0)), 4),
+        _younglimwon_period_start_iso(),
+        _younglimwon_period_end_iso(),
     )
+
+
+def _has_younglimwon_outbound_source() -> bool:
+    return _younglimwon_source_frame() is not None or bool(_younglimwon_outbound_totals())
+
+
+def _reapply_younglimwon_demand(
+    skus: list[SkuMaster],
+    *,
+    min_outbound: float,
+    period_days: float,
+) -> list[SkuMaster]:
+    raw = _younglimwon_source_frame()
+    if raw is not None:
+        imported, report = parse_younglimwon_inventory(
+            raw,
+            min_outbound=min_outbound,
+            period_days=period_days,
+        )
+        if not report.ok or not imported:
+            return skus
+        by_id = {sku.sku_id: sku for sku in imported}
+        updated: list[SkuMaster] = []
+        for sku in skus:
+            fresh = by_id.get(sku.sku_id)
+            if fresh is None:
+                updated.append(copy.deepcopy(sku))
+                continue
+            merged = copy.deepcopy(sku)
+            merged.avg_daily_demand = fresh.avg_daily_demand
+            merged.on_hand = fresh.on_hand
+            updated.append(merged)
+        return updated
+
+    totals = _younglimwon_outbound_totals()
+    if not totals:
+        return skus
+
+    period = max(1.0, float(period_days))
+    updated: list[SkuMaster] = []
+    for sku in skus:
+        outbound = totals.get(sku.sku_id)
+        if outbound is None:
+            updated.append(copy.deepcopy(sku))
+            continue
+        merged = copy.deepcopy(sku)
+        if outbound < min_outbound:
+            merged.avg_daily_demand = 0.0
+        else:
+            merged.avg_daily_demand = round(outbound / period, 2)
+        updated.append(merged)
+    return updated
+
+
+def _sync_younglimwon_demand_if_needed() -> None:
+    if not _has_younglimwon_outbound_source():
+        return
+    sig = _younglimwon_recalc_signature()
+    if st.session_state.get("ylw_recalc_sig") == sig:
+        return
+    min_out, period = float(sig[0]), _younglimwon_period_days()
+    updated = _reapply_younglimwon_demand(
+        _sku_list(),
+        min_outbound=min_out,
+        period_days=period,
+    )
+    st.session_state.skus = updated
+    st.session_state.ylw_recalc_sig = sig
+    _refresh_sales_from_skus(updated)
+    _save_session()
+    st.rerun()
+
+
+def _younglimwon_period_is_valid() -> bool:
+    start = st.session_state.get("ylw_period_start_date")
+    end = st.session_state.get("ylw_period_end_date")
+    if start is None or end is None:
+        return True
+    try:
+        return end >= start
+    except TypeError:
+        return True
+
+
+def _render_inventory_file_period_registration() -> tuple[float, float, bool]:
+    """Mandatory file metadata: which date range this export represents."""
+    st.warning(
+        "영림원 파일에는 **며칠~며칠** 정보가 없습니다. "
+        "파일을 올리기 **전에** ERP export와 같은 기간을 아래에 **등록**해 주세요."
+    )
+    _render_period_preset_buttons(prefix="ylw")
+    default_end = date.today()
+    default_start = default_end - timedelta(days=29)
+    c0, c1, c2 = st.columns(3)
+    with c0:
+        min_out = st.number_input(
+            "출고계 최소 (이상만)",
+            min_value=0.0,
+            value=float(st.session_state.get("ylw_min_outbound", 10.0)),
+            step=1.0,
+            help="영림원 재고현황 업로드 시 적용",
+            key="ylw_min_outbound",
+        )
+    with c1:
+        st.date_input(
+            "이 파일 · 시작일 (포함)",
+            value=default_start,
+            help="이 export의 출고계가 집계된 첫 날",
+            key="ylw_period_start_date",
+        )
+    with c2:
+        st.date_input(
+            "이 파일 · 종료일 (포함)",
+            value=default_end,
+            help="이 export의 출고계가 집계된 마지막 날",
+            key="ylw_period_end_date",
+        )
+
+    period_days = _younglimwon_period_days()
+    st.session_state["ylw_period_days"] = int(period_days)
+    period_ok = _younglimwon_period_is_valid()
+    if period_ok:
+        st.success(
+            f"**등록된 파일 기간:** {_younglimwon_period_label()} · "
+            f"일평균출고 = 출고계 ÷ {int(period_days)}"
+        )
+    else:
+        st.error("종료일은 시작일과 같거나 이후여야 합니다. 기간을 등록한 뒤 파일을 업로드하세요.")
+    return float(min_out), period_days, period_ok
+
+
+def _render_younglimwon_outbound_body(
+    skus: list[SkuMaster],
+) -> tuple[float, float]:
     ylw_min_out, ylw_period = _render_younglimwon_date_range()
-    has_demand = any(sku.avg_daily_demand > 0 for sku in skus)
+    source_frame = _younglimwon_source_frame()
     _render_outbound_calc_panel(
         period_days=ylw_period,
         period_label=_younglimwon_period_label(),
-        skus=skus,
+        raw_frame=source_frame,
+        outbound_totals=_younglimwon_outbound_totals() or None,
+        skus=skus if source_frame is None and not _younglimwon_outbound_totals() else None,
         min_outbound=float(ylw_min_out),
-        expanded=has_demand,
+        expanded=False,
     )
-    _render_last_outbound_preview()
+    _sync_younglimwon_demand_if_needed()
+    if _has_younglimwon_outbound_source():
+        st.caption("집계 기간·출고계 최소값을 바꾸면 **일평균출고가 자동 반영**됩니다.")
     return float(ylw_min_out), float(ylw_period)
+
+
+def _render_younglimwon_outbound_tools(
+    skus: list[SkuMaster],
+    *,
+    compact: bool = False,
+) -> tuple[float, float]:
+    """출고계 period settings — compact mode for ERP import tab."""
+    ctx = (
+        st.expander("출고계 기간 · 일평균출고 (영림원 2.xlsx)", expanded=True)
+        if compact
+        else nullcontext()
+    )
+    with ctx:
+        if not compact:
+            st.markdown("### 📅 출고계 기간 · 일평균출고")
+        st.info(
+            "영림원 **출고계** = ERP가 이미 합산한 **기간 출고 합계**입니다. "
+            "파일에 날짜가 없으므로 아래 **집계 시작·종료일**로 export 구간을 맞춰 주세요. "
+            "날짜별 필터가 아니라 **일평균출고 = 출고계 ÷ 기간(일)** 로만 계산합니다."
+        )
+        return _render_younglimwon_outbound_body(skus)
 
 
 def _render_outbound_calc_panel(
@@ -238,6 +414,7 @@ def _render_outbound_calc_panel(
     period_days: float,
     period_label: str,
     raw_frame: pd.DataFrame | None = None,
+    outbound_totals: dict[str, float] | None = None,
     skus: list[SkuMaster] | None = None,
     min_outbound: float = 0.0,
     expanded: bool = True,
@@ -253,12 +430,50 @@ def _render_outbound_calc_panel(
                 min_outbound=min_outbound,
                 period_days=period_days,
             )
+        elif outbound_totals:
+            preview = _preview_from_outbound_totals(
+                _sku_list(),
+                outbound_totals,
+                min_outbound=min_outbound,
+                period_days=period_days,
+            )
         elif skus:
+            st.caption(
+                "원본 **출고계**가 없어 저장된 일평균출고만 역산 표시합니다. "
+                "정확한 재계산은 ① 재고 파일을 다시 가져오세요."
+            )
             preview = build_outbound_preview_from_skus(skus, period_days=period_days)
         if preview.empty:
             st.info("검증할 출고계·일평균출고 데이터가 없습니다.")
         else:
             st.dataframe(preview, use_container_width=True, hide_index=True)
+
+
+def _preview_from_outbound_totals(
+    skus: list[SkuMaster],
+    totals: dict[str, float],
+    *,
+    min_outbound: float,
+    period_days: float,
+    limit: int = 10,
+) -> pd.DataFrame:
+    names = {sku.sku_id: sku.name for sku in skus}
+    period = max(1.0, float(period_days))
+    rows = [
+        {
+            "품목코드": sku_id,
+            "품명": names.get(sku_id, sku_id),
+            "출고계": outbound,
+            "기간(일)": int(period),
+            "일평균출고": round(outbound / period, 2),
+        }
+        for sku_id, outbound in totals.items()
+        if outbound >= min_outbound
+    ]
+    if not rows:
+        return pd.DataFrame()
+    rows.sort(key=lambda row: row["출고계"], reverse=True)
+    return pd.DataFrame(rows[:limit])
 
 
 def _render_younglimwon_date_range(
@@ -684,7 +899,7 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
     if flash:
         st.success(flash)
 
-    ylw_min_out, ylw_period = _render_younglimwon_outbound_tools(skus)
+    st.info("재고·WMS 파일 업로드는 **「ERP · WMS 가져오기」** 탭에서 하세요. 여기는 표 편집용입니다.")
     st.markdown("---")
 
     with st.expander("📥 대량 가져오기 (CSV / Excel)", expanded=len(skus) < 30):
@@ -707,7 +922,7 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
             format_func=lambda k: MERGE_MODE_LABELS[k],
             key="master_bulk_mode",
         )
-        st.info("↑ 위 **출고계 기간 · 검증** 설정이 이 가져오기에 그대로 적용됩니다.")
+        ylw_min_out, ylw_period = _render_younglimwon_outbound_tools(skus, compact=True)
         tpl_c1, tpl_c2 = st.columns(2)
         with tpl_c1:
             st.download_button(
@@ -774,11 +989,7 @@ def _render_master_edit(skus: list[SkuMaster]) -> None:
                 saved = _save_session()
                 parts.append(persist_result_message(saved).strip())
                 st.session_state.master_save_flash = " · ".join(parts)
-                st.session_state.last_outbound_preview = build_younglimwon_outbound_preview(
-                    raw,
-                    min_outbound=float(ylw_min_out),
-                    period_days=float(ylw_period),
-                )
+                _store_younglimwon_source_frame(raw)
                 for warning in report.warnings[:5]:
                     st.warning(warning)
                 st.rerun()
@@ -1286,71 +1497,76 @@ def tab_promo(skus: list[SkuMaster]) -> None:
 
 
 def tab_erp_import(skus: list[SkuMaster]) -> None:
-    st.caption("사내 ERP 내보내기 CSV → Instock CT · 발주안 CSV → ERP 재등록")
-    st.info(
-        "**전 컬럼을 손으로 채울 필요 없습니다.** "
-        "WMS·ERP·재고 Excel에서 **품목코드·품명·현재고**만 있어도 가져올 수 있습니다. "
-        "나머지(리드타임·MOQ·유통기한 등)는 없으면 기본값이 들어가고, **③ 데이터 연동 → 마스터 편집**에서 나중에 보완하면 됩니다."
+    st.caption("**매일:** ① 재고 → (있으면) ② WMS 유통기한 · ③ 주간 출고는 거의 불필요")
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("로드 SKU", f"{len(skus):,}")
+    lot_count = len(st.session_state.get("expiry_lots") or [])
+    m2.metric("WMS LOT", f"{lot_count:,}" if lot_count else "—")
+    sales_count = len(st.session_state.get("imported_sales") or [])
+    m3.metric("수요 데이터", f"{sales_count:,}건" if sales_count else "—")
+
+    tab_inv, tab_wms, tab_ship = st.tabs(
+        ["① 재고 가져오기", "② WMS 유통기한", "③ 주간 출고 (선택)"]
     )
 
-    st.markdown(f"**현재 로드된 품목 ({len(skus)}건)**")
-    if skus:
-        st.dataframe(
-            _skus_to_edit_frame(skus),
-            hide_index=True,
-            use_container_width=True,
-            height=320,
-        )
-    else:
-        st.warning("표시할 SKU가 없습니다. 사이드바에서 카테고리를 확인하거나 샘플 SKU를 초기화하세요.")
-
-    st.markdown("---")
-    _render_younglimwon_outbound_tools(_sku_list())
-    st.markdown("---")
-    preset = st.radio(
-        "파일 형식",
-        options=list(PRESET_LABELS.keys()),
-        format_func=lambda k: PRESET_LABELS[k],
-        horizontal=True,
-    )
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.markdown("**① 재고·품목 정보 가져오기**")
-        d1, d2 = st.columns(2)
-        with d1:
-            st.download_button(
-                "최소 템플릿 (4컬럼)",
-                build_minimal_erp_sku_csv_bytes(),
-                file_name="erp_inventory_minimal.csv",
-                mime="text/csv",
-                use_container_width=True,
+    with tab_inv:
+        st.markdown("**영림원 2.xlsx** 또는 ERP 재고 파일 → 품목·현재고·일평균출고 반영")
+        st.markdown("##### ① 이 파일의 데이터 기간 등록 (필수 · 업로드 전)")
+        ylw_min_out, ylw_period, period_ok = _render_inventory_file_period_registration()
+        if _has_younglimwon_outbound_source():
+            _render_outbound_calc_panel(
+                period_days=ylw_period,
+                period_label=_younglimwon_period_label(),
+                raw_frame=_younglimwon_source_frame(),
+                outbound_totals=_younglimwon_outbound_totals() or None,
+                min_outbound=float(ylw_min_out),
+                expanded=False,
             )
-        with d2:
-            st.download_button(
-                "전체 샘플 CSV",
-                build_sample_erp_sku_csv_bytes(),
-                file_name="erp_inventory_export.sample.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
-        st.caption("필수: 품목코드 · 품명 · 현재고 · (권장) 일평균출고")
-        st.caption("↑ 위 **출고계 기간 · 검증** 설정이 이 가져오기에 적용됩니다.")
-        ylw_min_out = float(st.session_state.get("ylw_min_outbound", 10.0))
-        ylw_period = _younglimwon_period_days()
+            _sync_younglimwon_demand_if_needed()
+            st.caption("등록 기간을 바꾸면 **일평균출고가 자동 반영**됩니다.")
+        st.markdown("##### ② 재고 파일 업로드")
+        st.caption("위에 등록한 기간과 **같은 export**일 때만 올려 주세요.")
         inv_file = st.file_uploader(
-            "재고 CSV / Excel (.xlsx)",
+            "재고 Excel / CSV",
             type=["csv", "xlsx", "xls"],
             key=_file_uploader_key("erp_inv"),
+            disabled=not period_ok,
         )
-        run_inv_import = st.button(
-            "재고 가져오기 실행",
+        with st.expander("다른 파일 형식 · 샘플", expanded=False):
+            preset = st.radio(
+                "파일 형식",
+                options=list(PRESET_LABELS.keys()),
+                format_func=lambda k: PRESET_LABELS[k],
+                key="erp_import_preset",
+                horizontal=True,
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                st.download_button(
+                    "최소 템플릿 CSV",
+                    build_minimal_erp_sku_csv_bytes(),
+                    file_name="erp_inventory_minimal.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+            with c2:
+                st.download_button(
+                    "전체 샘플 CSV",
+                    build_sample_erp_sku_csv_bytes(),
+                    file_name="erp_inventory_export.sample.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+        st.markdown("##### ③ 실행")
+        if st.button(
+            "✅ 재고 가져오기",
             type="primary",
             use_container_width=True,
             key="erp_inv_run",
-            disabled=inv_file is None,
-        )
-        if run_inv_import and inv_file is not None:
+            disabled=inv_file is None or not period_ok,
+        ):
+            preset = st.session_state.get("erp_import_preset", "younglimwon")
             raw = read_uploaded_table(inv_file)
             skus, report = parse_inventory_upload(
                 inv_file,
@@ -1371,50 +1587,99 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
                 ) or None
                 _bump_data_editor("master_editor")
                 _reset_file_uploader("erp_inv")
-                st.session_state.last_outbound_preview = build_younglimwon_outbound_preview(
-                    raw,
-                    min_outbound=float(ylw_min_out),
-                    period_days=float(ylw_period),
-                )
+                _store_younglimwon_source_frame(raw)
                 saved = _save_session()
                 st.success("; ".join(report.messages) + persist_result_message(saved))
-                if st.session_state.imported_sales:
-                    st.info(
-                        f"② 수요·프로모션 탭에 출고 데이터 {len(st.session_state.imported_sales)}건 연동됨"
-                    )
                 for w in report.warnings[:5]:
                     st.warning(w)
-                st.dataframe(skus_to_erp_export_frame(skus).head(10), hide_index=True)
+                st.rerun()
             else:
                 st.error("; ".join(report.messages))
 
-    with col_b:
-        st.markdown("**② 주간 출고 데이터 가져오기 (선택)**")
-        st.caption(
-            "영림원 **2.xlsx**는 왼쪽 재고 업로드만으로 충분합니다(출고계→일평균출고). "
-            "여기는 ② 수요·프로모션용 **주간 출고 이력** 또는 같은 재고현황 파일을 넣을 때 사용합니다."
+    with tab_wms:
+        st.markdown("**WMS export** → SKU별 유통기한·LOT 수량 (영림원 파일에는 없음)")
+        if lot_count:
+            st.info(f"적용 중: {lot_count} LOT / {len({lot.sku_id for lot in st.session_state.expiry_lots})} SKU")
+        wms_file = st.file_uploader(
+            "WMS 유통기한 Excel / CSV",
+            type=["csv", "xlsx", "xls"],
+            key=_file_uploader_key("erp_wms_expiry"),
         )
-        sample_path = _SAMPLES_DIR / "erp_weekly_shipment.sample.csv"
-        if sample_path.is_file():
+        with st.expander("WMS 샘플 · 필수 컬럼", expanded=False):
             st.download_button(
-                "ERP 출고 내보내기 샘플 CSV",
-                sample_path.read_bytes(),
-                file_name="erp_weekly_shipment.sample.csv",
+                "샘플 CSV",
+                build_sample_wms_expiry_csv_bytes(),
+                file_name="wms_expiry.sample.csv",
                 mime="text/csv",
             )
+            st.code("상품코드(품목코드), 유통기한, 재고수량", language="text")
+        if st.button(
+            "✅ WMS 가져오기",
+            type="primary",
+            use_container_width=True,
+            key="erp_wms_run",
+            disabled=wms_file is None,
+        ):
+            try:
+                raw = read_uploaded_table(wms_file)
+                lots, report = parse_wms_expiry_lots(raw)
+            except Exception as exc:
+                st.error(f"파일을 읽을 수 없습니다: {exc}")
+            else:
+                if report.ok:
+                    st.session_state.expiry_lots = lots
+                    updated, match_report = apply_expiry_lots_to_skus(_sku_list(), lots)
+                    st.session_state.skus = updated
+                    _bump_data_editor("master_editor")
+                    _reset_file_uploader("erp_wms_expiry")
+                    saved = _save_session()
+                    st.success(
+                        "; ".join(report.messages + match_report.messages)
+                        + persist_result_message(saved)
+                    )
+                    st.rerun()
+                else:
+                    st.error("; ".join(report.messages))
+                for warning in report.warnings[:5]:
+                    st.warning(warning)
+
+    with tab_ship:
+        st.markdown(
+            "**주간 출고 이력** (품목코드·주간시작일·출고수량) — "
+            "영림원 2.xlsx만 쓰면 **①만** 하면 됩니다."
+        )
+        ylw_min_out = float(st.session_state.get("ylw_min_outbound", 10.0))
+        ylw_period = _younglimwon_period_days()
         ship_file = st.file_uploader(
-            "출고 CSV / Excel",
+            "출고 Excel / CSV",
             type=["csv", "xlsx", "xls"],
             key=_file_uploader_key("erp_ship"),
         )
-        run_ship_import = st.button(
-            "출고 가져오기 실행",
+        with st.expander("샘플 · 형식", expanded=False):
+            preset = st.radio(
+                "파일 형식",
+                options=list(PRESET_LABELS.keys()),
+                format_func=lambda k: PRESET_LABELS[k],
+                key="erp_ship_preset",
+                horizontal=True,
+            )
+            sample_path = _SAMPLES_DIR / "erp_weekly_shipment.sample.csv"
+            if sample_path.is_file():
+                st.download_button(
+                    "주간 출고 샘플 CSV",
+                    sample_path.read_bytes(),
+                    file_name="erp_weekly_shipment.sample.csv",
+                    mime="text/csv",
+                )
+            st.code("품목코드, 주간시작일, 출고수량", language="text")
+        if st.button(
+            "✅ 출고 가져오기",
             type="primary",
             use_container_width=True,
             key="erp_ship_run",
             disabled=ship_file is None,
-        )
-        if run_ship_import and ship_file is not None:
+        ):
+            preset = st.session_state.get("erp_ship_preset", "erp_korean")
             try:
                 raw = read_uploaded_table(ship_file)
                 sales, report = parse_sales_upload(
@@ -1433,92 +1698,22 @@ def tab_erp_import(skus: list[SkuMaster]) -> None:
                     _reset_file_uploader("erp_ship")
                     saved = _save_session()
                     st.success("; ".join(report.messages) + persist_result_message(saved))
-                    st.info("② 수요·프로모션 탭에서 이 데이터를 사용합니다.")
+                    st.rerun()
                 else:
                     st.error("; ".join(report.messages))
                 for warning in report.warnings[:5]:
                     st.warning(warning)
 
-    st.markdown("---")
-    st.markdown("**③ 외주 WMS 유통기한 가져오기**")
-    st.caption(
-        "영림원 재고 파일에는 유통기한이 없을 때 사용합니다. "
-        "WMS export를 올리면 **SKU번호로 매칭**되어 유통기한별 재고 수량이 적용됩니다."
-    )
-    st.download_button(
-        "WMS 유통기한 샘플 CSV",
-        build_sample_wms_expiry_csv_bytes(),
-        file_name="wms_expiry.sample.csv",
-        mime="text/csv",
-    )
-    if st.session_state.get("expiry_lots"):
-        lot_count = len(st.session_state.expiry_lots)
-        sku_count = len({lot.sku_id for lot in st.session_state.expiry_lots})
-        st.info(f"WMS 유통기한 {lot_count} LOT / {sku_count} SKU 적용 중")
-    wms_file = st.file_uploader(
-        "WMS 유통기한 CSV / Excel",
-        type=["csv", "xlsx", "xls"],
-        key=_file_uploader_key("erp_wms_expiry"),
-    )
-    run_wms_import = st.button(
-        "WMS 유통기한 가져오기 실행",
-        type="primary",
-        use_container_width=True,
-        key="erp_wms_run",
-        disabled=wms_file is None,
-    )
-    if run_wms_import and wms_file is not None:
-        try:
-            raw = read_uploaded_table(wms_file)
-            lots, report = parse_wms_expiry_lots(raw)
-        except Exception as exc:
-            st.error(f"파일을 읽을 수 없습니다: {exc}")
+    with st.expander(f"현재 마스터 미리보기 ({len(skus)}건)", expanded=False):
+        if skus:
+            st.dataframe(
+                _skus_to_edit_frame(skus),
+                hide_index=True,
+                use_container_width=True,
+                height=280,
+            )
         else:
-            if report.ok:
-                st.session_state.expiry_lots = lots
-                updated, match_report = apply_expiry_lots_to_skus(_sku_list(), lots)
-                st.session_state.skus = updated
-                _bump_data_editor("master_editor")
-                _reset_file_uploader("erp_wms_expiry")
-                saved = _save_session()
-                st.success(
-                    "; ".join(report.messages + match_report.messages)
-                    + persist_result_message(saved)
-                )
-                preview_rows = []
-                for lot in lots[:20]:
-                    sku = _skus_by_id().get(lot.sku_id)
-                    preview_rows.append(
-                        {
-                            "품목코드": lot.sku_id,
-                            "품명": sku.name if sku else "-",
-                            "유통기한": lot.expiry_date,
-                            "수량": lot.qty,
-                        }
-                    )
-                st.dataframe(pd.DataFrame(preview_rows), hide_index=True)
-            else:
-                st.error("; ".join(report.messages))
-            for warning in report.warnings[:5]:
-                st.warning(warning)
-            if report.ok and match_report.warnings:
-                for warning in match_report.warnings[:5]:
-                    st.warning(warning)
-
-    st.markdown("---")
-    st.markdown("**필수 컬럼 (재고 CSV)**")
-    st.code("품목코드, 품명, 현재고", language="text")
-    st.markdown("**선택 컬럼 — 없으면 기본값**")
-    st.code(
-        "일평균출고(0), 카테고리(일반 소모품), 리드타임일(7), MOQ(1), "
-        "거래처명(-), 안전재고일(7), 유통기한, 임박재고",
-        language="text",
-    )
-    st.markdown("**ERP 한글 내보내기 필수 컬럼 (출고)**")
-    st.code("품목코드, 주간시작일, 출고수량", language="text")
-    st.markdown("**WMS 유통기한 필수 컬럼**")
-    st.code("품목코드, 유통기한, 수량", language="text")
-    st.caption("같은 SKU에 유통기한이 여러 개면 행을 나눠서 입력 (LOT별 수량)")
+            st.info("아직 SKU가 없습니다. ① 재고 가져오기부터 진행하세요.")
 
 
 def _render_weekly_sales_chart(sku_sales: pd.DataFrame) -> None:

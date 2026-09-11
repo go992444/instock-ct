@@ -86,7 +86,7 @@ def _save_sqlite(key: str, payload: str) -> bool:
         return False
 
 
-def _load_sqlite(key: str) -> tuple[list[SkuMaster], list[WeeklySales] | None, list[ExpiryLot] | None] | None:
+def _load_sqlite(key: str) -> tuple[list[SkuMaster], list[WeeklySales] | None, list[ExpiryLot] | None, dict[str, float] | None] | None:
     try:
         conn = _sqlite_connect()
         row = conn.execute("SELECT payload FROM snapshots WHERE key = ?", (key,)).fetchone()
@@ -151,7 +151,7 @@ def _write_snapshot_file(path: Path, payload: str) -> bool:
         return False
 
 
-def _read_snapshot_file(path: Path) -> tuple[list[SkuMaster], list[WeeklySales] | None, list[ExpiryLot] | None] | None:
+def _read_snapshot_file(path: Path) -> tuple[list[SkuMaster], list[WeeklySales] | None, list[ExpiryLot] | None, dict[str, float] | None] | None:
     if not path.is_file():
         return None
     try:
@@ -160,13 +160,23 @@ def _read_snapshot_file(path: Path) -> tuple[list[SkuMaster], list[WeeklySales] 
         return None
 
 
+def _apply_restored_younglimwon_totals(ylw_outbound_totals: dict[str, float] | None) -> None:
+    if ylw_outbound_totals:
+        st.session_state.ylw_outbound_totals = ylw_outbound_totals
+
+
 def save_server_snapshot(
     client_id: str,
     skus: list[SkuMaster],
     imported_sales: list[WeeklySales] | None,
     expiry_lots: list[ExpiryLot] | None = None,
 ) -> bool:
-    payload = snapshot_to_json(skus, imported_sales, expiry_lots)
+    payload = snapshot_to_json(
+        skus,
+        imported_sales,
+        expiry_lots,
+        ylw_outbound_totals=st.session_state.get("ylw_outbound_totals"),
+    )
     cid_ok = _write_snapshot_file(_persist_path(client_id), payload)
     global_ok = _write_snapshot_file(GLOBAL_SNAPSHOT_PATH, payload)
     sqlite_cid_ok = _save_sqlite(f"cid:{client_id}", payload)
@@ -176,22 +186,22 @@ def save_server_snapshot(
 
 def load_server_snapshot(
     client_id: str,
-) -> tuple[list[SkuMaster], list[WeeklySales] | None, list[ExpiryLot] | None, str] | None:
+) -> tuple[list[SkuMaster], list[WeeklySales] | None, list[ExpiryLot] | None, dict[str, float] | None, str] | None:
     for key, source in (
         (f"cid:{client_id}", "sqlite"),
         ("global", "sqlite"),
     ):
         data = _load_sqlite(key)
         if data is not None:
-            return data[0], data[1], data[2], source
+            return data[0], data[1], data[2], data[3], source
 
     data = _read_snapshot_file(_persist_path(client_id))
     if data is not None:
-        return data[0], data[1], data[2], "server"
+        return data[0], data[1], data[2], data[3], "server"
 
     data = _read_snapshot_file(GLOBAL_SNAPSHOT_PATH)
     if data is not None:
-        return data[0], data[1], data[2], "global"
+        return data[0], data[1], data[2], data[3], "global"
 
     return None
 
@@ -239,10 +249,11 @@ def ensure_session_restored() -> None:
 
     server_data = load_server_snapshot(client_id)
     if server_data is not None:
-        skus, imported_sales, expiry_lots, source = server_data
+        skus, imported_sales, expiry_lots, ylw_outbound_totals, source = server_data
         st.session_state.skus = skus
         st.session_state.imported_sales = imported_sales
         _apply_restored_expiry_lots(expiry_lots)
+        _apply_restored_younglimwon_totals(ylw_outbound_totals)
         st.session_state._session_persist_ready = True
         st.session_state._browser_storage_ready = True
         st.session_state._session_persist_restored = True
@@ -308,6 +319,9 @@ def clear_session_data() -> None:
         delete_server_snapshot(client_id)
     clear_browser_storage()
     st.session_state.expiry_lots = None
+    st.session_state.pop("ylw_outbound_totals", None)
+    st.session_state.pop("last_younglimwon_frame", None)
+    st.session_state.pop("ylw_recalc_sig", None)
     st.session_state._persist_dirty = False
     st.session_state._last_persist_count = 0
     st.session_state._server_snapshot_exists = False

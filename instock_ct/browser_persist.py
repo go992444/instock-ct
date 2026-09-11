@@ -78,7 +78,12 @@ def queue_browser_save(
     imported_sales: list[WeeklySales] | None,
     expiry_lots: list[ExpiryLot] | None = None,
 ) -> None:
-    st.session_state._browser_save_payload = snapshot_to_json(skus, imported_sales, expiry_lots)
+    st.session_state._browser_save_payload = snapshot_to_json(
+        skus,
+        imported_sales,
+        expiry_lots,
+        ylw_outbound_totals=st.session_state.get("ylw_outbound_totals"),
+    )
 
 
 def flush_browser_save_if_pending() -> None:
@@ -136,7 +141,7 @@ def ensure_browser_storage_restored() -> None:
         return
 
     try:
-        skus, imported_sales, expiry_lots = parse_snapshot(str(stored))
+        skus, imported_sales, expiry_lots, ylw_outbound_totals = parse_snapshot(str(stored))
     except (json.JSONDecodeError, ValueError, KeyError, TypeError):
         st.session_state._browser_storage_corrupt = True
         return
@@ -145,6 +150,8 @@ def ensure_browser_storage_restored() -> None:
     st.session_state.imported_sales = imported_sales
     if expiry_lots:
         st.session_state.expiry_lots = expiry_lots
+    if ylw_outbound_totals:
+        st.session_state.ylw_outbound_totals = ylw_outbound_totals
     st.session_state._browser_storage_restored = True
 
 
